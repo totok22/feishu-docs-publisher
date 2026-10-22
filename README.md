@@ -152,6 +152,8 @@ PNG, JPEG/JPG, GIF, WebP, and BMP are supported. Images must stay inside the cur
 
 Right-click a folder and choose `Lark: Sync to Feishu/Lark`. The plugin creates the matching remote hierarchy, syncs Markdown and PDF files, and rewrites Markdown internal links in the uploaded content.
 
+Images that no note embeds would never reach the remote, so folder sync collects them into a generated note named `<folder> images.md`, stored in the same folder as the images. The note embeds each unreferenced image with a `![[path]]` link and is published like any other note. Images already embedded by a note are skipped. The next folder sync refreshes the note as images are added, removed, or later referenced. You can rename the note; the plugin recognizes it by a hidden comment on its first line.
+
 In a wiki (`/wiki/...`) or personal document library, each folder is itself a document. The plugin inserts a native Feishu/Lark sub-page list into folder documents at every level. Feishu/Lark maintains those document links; the plugin does not generate the links or embed child document content.
 
 Normal folder sync reuses an existing list and preserves other content on the folder page. Folder overwrite resets the folder page body to its native sub-page list. Drive targets (`/drive/folder/...`) use ordinary folders and do not receive a list.

@@ -118,6 +118,8 @@ import {
 	EMBEDDED_PRE_PUSH_SCRIPT
 } from "./embedded-helpers";
 import {
+	buildLocalImageFileIndex,
+	collectReferencedLocalImagePaths,
 	containsLocalImagePlaceholders,
 	findReferencingMarkdownFiles,
 	isSupportedImagePath,
@@ -132,6 +134,12 @@ import {
 	materializeLocalImages as materializePreparedLocalImages
 } from "./media-sync-orchestrator";
 
+import {
+	buildImageGalleryBody,
+	isImageGalleryContent,
+	planImageGalleries,
+	replaceImageGalleryBody
+} from "./image-gallery";
 import { PublishedLinkBindingModal, PublishedLinkEntry, PublishedLinksHost, PublishedLinksModal } from "./published-links";
 import { createPdfBindingKey, PdfBinding, PdfPublishParent, publishPdf } from "./pdf-publish";
 import { buildPublishedPdfTargets, rewritePublishedPdfLinks } from "./pdf-links";
@@ -491,7 +499,9 @@ const MESSAGES = {
 		noticeSyncingToLark: "正在同步到飞书...",
 		noticeOverwriteSyncingToLark: "正在覆盖同步到飞书...",
 		noticePublishingFolderToLark: "正在发布目录到飞书...",
-		noticeNoMarkdownFilesInFolder: "该目录下没有 Markdown 或 PDF 文件。",
+		noticeNoMarkdownFilesInFolder: "该目录下没有 Markdown、PDF 或图片文件。",
+		noticeImageGalleryCreated: "已生成 {count} 篇图片汇总笔记，收录未被文档引用的图片。",
+		imageGalleryNoteName: "{name} 图片",
 		noticePublishedToLark: "已发布到飞书",
 		noticeSyncedToLark: "已同步到飞书",
 		noticeOverwriteSyncedToLark: "已覆盖同步到飞书",
@@ -637,7 +647,9 @@ const MESSAGES = {
 		noticeSyncingToLark: "Syncing to Lark...",
 		noticeOverwriteSyncingToLark: "Overwriting to Lark...",
 		noticePublishingFolderToLark: "Publishing folder to Lark...",
-		noticeNoMarkdownFilesInFolder: "No Markdown or PDF files found in this folder.",
+		noticeNoMarkdownFilesInFolder: "No Markdown, PDF, or image files found in this folder.",
+		noticeImageGalleryCreated: "Created {count} image gallery notes for images no document references.",
+		imageGalleryNoteName: "{name} images",
 		noticePublishedToLark: "Published to Feishu/Lark",
 		noticeSyncedToLark: "Synced to Feishu/Lark",
 		noticeOverwriteSyncedToLark: "Overwritten to Feishu/Lark",
@@ -2206,6 +2218,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		await (this.operationQueue ??= new SyncQueue()).run(() => this.withDeferredLarkSyncStateSave(async () => {
 			if (this.hasUnsavedSettings) await this.saveSettingsWithoutClearingCommandCache();
 			const reconnected = clearDisconnectedFolderPaths(this.settings.disconnectedFolders ??= {}, folderPath);
+			const createdGalleries = await this.ensureImageGalleryNotes(folderPath);
 			const files = this.collectMarkdownFiles(folderPath).filter((file) => !this.isFolderDisconnected(file.path));
 			const pdfFiles = this.app.vault.getFiles().filter((file) => file.extension.toLowerCase() === "pdf"
 				&& this.isPathWithin(file.path, folderPath) && !this.isFolderDisconnected(file.path));
@@ -2280,8 +2293,50 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			await this.saveSettings();
 
 			new Notice(this.t("noticePublishedFolderToLark", { count: String(entries.length + pdfFiles.length) }), 8000);
+			if (createdGalleries) new Notice(this.t("noticeImageGalleryCreated", { count: String(createdGalleries) }), 8000);
 			if (removed) new Notice(this.t("noticeRemovedDuplicates", { count: String(removed) }), 8000);
 		}));
+	}
+
+	/**
+	 * Images that no note embeds never reach the remote, so collect them into one generated
+	 * note per folder. Images already embedded by a hand-written note are left alone.
+	 */
+	private async ensureImageGalleryNotes(folderPath: string): Promise<number> {
+		const images = this.app.vault.getFiles().filter((file) => isSupportedImagePath(file.path)
+			&& this.isPathWithin(file.path, folderPath) && !this.isFolderDisconnected(file.path));
+		if (images.length === 0) return 0;
+
+		const notes = await Promise.all(this.collectMarkdownFiles(folderPath)
+			.filter((file) => !this.isFolderDisconnected(file.path))
+			.map(async (file) => ({ file, content: await this.app.vault.read(file) })));
+		const plans = planImageGalleries({
+			imagePaths: images.map((file) => file.path),
+			notes: notes.map(({ file, content }) => ({ path: file.path, isGallery: isImageGalleryContent(content) })),
+			referencedImagePaths: collectReferencedLocalImagePaths(
+				notes.filter(({ content }) => !isImageGalleryContent(content))
+					.map(({ file, content }) => ({ path: file.path, content })),
+				await buildLocalImageFileIndex(this.getVaultRoot())
+			),
+			noteName: (folderName) => this.t("imageGalleryNoteName", { name: folderName || this.app.vault.getName() })
+		});
+
+		let created = 0;
+		for (const plan of plans) {
+			if (!plan.exists) {
+				this.selfWrittenPaths.set(plan.notePath, Date.now());
+				await this.app.vault.create(plan.notePath, buildImageGalleryBody(plan.imagePaths));
+				created += 1;
+				continue;
+			}
+			const existing = notes.find(({ file }) => file.path === plan.notePath);
+			if (!existing) continue;
+			const next = replaceImageGalleryBody(existing.content, plan.imagePaths);
+			if (next === existing.content) continue;
+			this.selfWrittenPaths.set(plan.notePath, Date.now());
+			await this.app.vault.modify(existing.file, next);
+		}
+		return created;
 	}
 
 	private async consolidateOverwriteFolderPages(folderPath: string, folderRoot: string, rootParent: RemoteParent): Promise<number> {

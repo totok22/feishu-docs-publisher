@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import esbuild from "esbuild";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -1354,5 +1354,59 @@ upgradePlugin.runNpmCapture = async (args) => {
 upgradePlugin.getLarkCliManagementStatus = async () => ({ ...cliStatus, installed: true, version: "1.0.98", updateAvailable: false });
 await upgradePlugin.installOrUpgradeLarkCli();
 assert.deepEqual(upgradeCommands, [["install", "-g", "@larksuite/cli@latest", "--no-audit", "--no-fund"]]);
+
+const galleryRoot = await mkdtemp(join(tmpdir(), "image-gallery-main-"));
+try {
+	await mkdir(join(galleryRoot, "Root", "Shots"), { recursive: true });
+	await mkdir(join(galleryRoot, "Root", "Notes"), { recursive: true });
+	await mkdir(join(galleryRoot, "Hidden"), { recursive: true });
+	const imagePaths = ["Root/Shots/b.png", "Root/Shots/a.png", "Root/Notes/used.png", "Root/Notes/spare.png", "Hidden/x.png"];
+	for (const path of imagePaths) await writeFile(join(galleryRoot, path), "x");
+	const contents = new Map([["Root/Notes/Readme.md", "![[used.png]]\n"]]);
+	const writes = [];
+	const createGalleryPlugin = () => {
+		const plugin = createPublishingPlugin();
+		plugin.getVaultRoot = () => galleryRoot;
+		plugin.settings.disconnectedFolders = { Hidden: true };
+		plugin.app.vault = {
+			getName: () => "Vault",
+			getFiles: () => imagePaths.map((path) => ({ path, extension: "png" })),
+			getMarkdownFiles: () => Array.from(contents.keys()).map((path) => ({ path, extension: "md" })),
+			read: async (file) => contents.get(file.path),
+			create: async (path, content) => { writes.push({ kind: "create", path }); contents.set(path, content); },
+			modify: async (file, content) => { writes.push({ kind: "modify", path: file.path }); contents.set(file.path, content); }
+		};
+		return plugin;
+	};
+
+	// Unreferenced images are collected per folder, including folders that also hold notes.
+	const galleryPlugin = createGalleryPlugin();
+	assert.equal(await galleryPlugin.ensureImageGalleryNotes("Root"), 2);
+	assert.deepEqual(writes, [{ kind: "create", path: "Root/Notes/Notes 图片.md" }, { kind: "create", path: "Root/Shots/Shots 图片.md" }]);
+	assert.match(contents.get("Root/Notes/Notes 图片.md"), /^<!-- feishu-docs-publisher:image-gallery -->\n\n!\[\[Root\/Notes\/spare\.png\]\]\n$/);
+	assert.match(contents.get("Root/Shots/Shots 图片.md"), /!\[\[Root\/Shots\/a\.png\]\]\n\n!\[\[Root\/Shots\/b\.png\]\]\n$/);
+	assert.equal(contents.has("Hidden/Hidden 图片.md"), false, "disconnected folders are skipped");
+
+	// Running again leaves unchanged galleries alone, and picks up new images while keeping the binding.
+	writes.length = 0;
+	assert.equal(await galleryPlugin.ensureImageGalleryNotes("Root"), 0);
+	assert.deepEqual(writes, []);
+	contents.set("Root/Shots/Shots 图片.md", `---\nlark_url: https://example.feishu.cn/docx/shots\n---\n${contents.get("Root/Shots/Shots 图片.md")}`);
+	imagePaths.push("Root/Shots/c.png");
+	await writeFile(join(galleryRoot, "Root/Shots/c.png"), "x");
+	assert.equal(await galleryPlugin.ensureImageGalleryNotes("Root"), 0);
+	assert.deepEqual(writes, [{ kind: "modify", path: "Root/Shots/Shots 图片.md" }]);
+	assert.match(contents.get("Root/Shots/Shots 图片.md"), /^---\nlark_url: https:\/\/example\.feishu\.cn\/docx\/shots\n---\n\n<!-- feishu-docs-publisher:image-gallery -->/);
+	assert.match(contents.get("Root/Shots/Shots 图片.md"), /c\.png\]\]\n$/);
+
+	// A folder with nothing but images no longer stops at "no files": the gallery note is published.
+	contents.clear();
+	const imageOnlyPlugin = createGalleryPlugin();
+	imageOnlyPlugin.withDeferredLarkSyncStateSave = async (callback) => callback();
+	imageOnlyPlugin.readNoteForLark = async (file) => { throw new Error(`reached ${file.path}`); };
+	await assert.rejects(imageOnlyPlugin.publishFolderInternal("Root/Shots"), /reached Root\/Shots\/Shots 图片\.md/);
+} finally {
+	await rm(galleryRoot, { force: true, recursive: true });
+}
 
 console.log("main plugin tests passed");

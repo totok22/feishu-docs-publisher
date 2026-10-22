@@ -1,4 +1,5 @@
 import { isLocalImagePlaceholder } from "./local-image";
+import { stripImageGalleryMarker } from "./image-gallery";
 
 export { buildPublishedPdfTargets, rewritePublishedPdfLinks } from "./pdf-links";
 
@@ -220,7 +221,7 @@ const MIN_REPLACE_RUN_LENGTH_TO_COMPACT = 3;
 const DOCUMENT_END_BLOCK_ID = "-1";
 
 export function prepareNoteContentForLark(file: NoteFile, content: string, titleSource: TitleSource): string {
-	const normalizedContent = separateHeadingImages(content);
+	const normalizedContent = separateHeadingImages(stripImageGalleryMarker(content));
 	const title = extractTitle(file, normalizedContent, titleSource);
 	return prependMarkdownTitle(normalizedContent, title);
 }

@@ -163,6 +163,25 @@ export async function findReferencingMarkdownFiles(input: FindReferencingMarkdow
 	return Array.from(referencing).sort();
 }
 
+/** Vault paths of the images these notes embed. References that do not resolve are ignored. */
+export function collectReferencedLocalImagePaths(
+	notes: Array<{ path: string; content: string }>,
+	imageIndex: LocalImageFileIndex
+): Set<string> {
+	const referenced = new Set<string>();
+	for (const note of notes) {
+		for (const reference of scanLocalImageReferences(note.content)) {
+			try {
+				const vaultPath = resolveLocalImageVaultPath(reference.target, note.path, imageIndex);
+				if (vaultPath) referenced.add(vaultPath);
+			} catch (error) {
+				if (!(error instanceof LocalImageError)) throw error;
+			}
+		}
+	}
+	return referenced;
+}
+
 export function isLocalImagePlaceholder(content: string): boolean {
 	return new RegExp(`^${LOCAL_IMAGE_PLACEHOLDER_PREFIX}[a-f0-9]{64}$`).test(content.trim());
 }
