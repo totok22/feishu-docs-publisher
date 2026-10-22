@@ -877,6 +877,39 @@ const changedImagePlan = await buildSyncPlan({
 	doc: 'doc-token', markdown: importedImageBaseline.replace('logo.png', 'other.png'), contentFileName: 'sync.md', strategy: 'auto', state: importedImageState
 });
 assert.notEqual(changedImagePlan.mode, 'skipped', "changing the source image must still submit an update");
+
+const videoPlaceholder = 'FEISHU_LARK_LOCAL_VIDEO_' + 'a'.repeat(64);
+const localVideoMarkdown = `# Note\n\nBefore\n\n${videoPlaceholder}\n\nAfter`;
+const videoFigure = '<figure id="video-figure" view-type="Preview"><source id="video-source" token="uploaded-video" mime="video/mp4"/></figure>';
+const videoRemoteXml = `<title id="doc-token">Note</title><p id="before">Before</p>${videoFigure}<p id="after">After</p>`;
+const videoState = await createDocumentSyncStateFromRemote('doc-token', localVideoMarkdown, videoRemoteXml, 15);
+assert.deepEqual(videoState.units.map((unit) => [unit.kind, unit.blockId]), [
+	['paragraph', 'before'], ['figure', 'video-figure'], ['paragraph', 'after']
+], "map a video placeholder to the movable figure, not its nested source");
+assert.equal((await buildSyncPlan({
+	doc: 'doc-token', markdown: localVideoMarkdown, contentFileName: 'sync.md', strategy: 'precise', state: videoState
+})).mode, 'skipped', "an unchanged video must not generate another upload placeholder");
+const videoTextEditPlan = await buildSyncPlan({
+	doc: 'doc-token', markdown: localVideoMarkdown.replace('Before', 'Updated before'), contentFileName: 'sync.md', strategy: 'precise', state: videoState
+});
+assert.equal(videoTextEditPlan.mode, 'precise');
+assert.deepEqual(videoTextEditPlan.commands.map((command) => [command.command, command.blockId]), [['block_replace', 'before']],
+	"a nearby text edit must leave the existing video figure alone");
+const changedVideoPlan = await buildSyncPlan({
+	doc: 'doc-token', markdown: localVideoMarkdown.replace(videoPlaceholder, 'FEISHU_LARK_LOCAL_VIDEO_' + 'b'.repeat(64)),
+	contentFileName: 'sync.md', strategy: 'precise', state: videoState
+});
+assert.equal(changedVideoPlan.mode, 'precise');
+assert.deepEqual(changedVideoPlan.commands.map((command) => [command.command, command.blockId]), [['block_replace', 'video-figure']],
+	"a changed video hash must replace the figure with a new upload placeholder");
+assert.equal(await isRemoteXmlContentEquivalent(videoRemoteXml, localVideoMarkdown), true);
+assert.equal(await isRemoteXmlContentEquivalent(videoRemoteXml.replace(videoFigure, ''), localVideoMarkdown), false);
+assert.equal(await isRemoteXmlContentEquivalent(videoRemoteXml.replace('>After<', '>Lost text<'), localVideoMarkdown), false);
+const videoSignature = await createSyncContentSignature(localVideoMarkdown);
+const videoExport = `# Note\n\nBefore\n\n${videoFigure}\n\nAfter`;
+assert.equal(await isRemoteMarkdownContentEquivalent(videoExport, videoSignature), true);
+assert.equal(await isRemoteMarkdownContentEquivalent(videoExport.replace(videoFigure, ''), videoSignature), false);
+
 const paragraphUrlSignature = await createSyncContentSignature([
 	"# Note",
 	"",

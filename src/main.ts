@@ -123,6 +123,7 @@ import {
 	containsLocalImagePlaceholders,
 	findReferencingMarkdownFiles,
 	isSupportedImagePath,
+	isSupportedLocalMediaPath,
 	LocalImageResource,
 	prepareLocalImages,
 	scanLocalImageReferences
@@ -1073,23 +1074,23 @@ export default class LarkCliSyncPlugin extends Plugin {
 			}
 			if (file.extension === "md") {
 				this.queueSaveAutoSync(file);
-			} else if (isSupportedImagePath(file.path)) {
+			} else if (isSupportedLocalMediaPath(file.path)) {
 				void this.queueImageReferenceAutoSync([file.path]);
 			}
 		}));
 		this.registerEvent(this.app.vault.on("create", (file) => {
-			if (this.settings.autoSyncMode === "save" && file instanceof TFile && isSupportedImagePath(file.path)) {
+			if (this.settings.autoSyncMode === "save" && file instanceof TFile && isSupportedLocalMediaPath(file.path)) {
 				void this.queueImageReferenceAutoSync([file.path]);
 			}
 		}));
 		this.registerEvent(this.app.vault.on("delete", (file) => {
-			if (this.settings.autoSyncMode === "save" && file instanceof TFile && isSupportedImagePath(file.path)) {
+			if (this.settings.autoSyncMode === "save" && file instanceof TFile && isSupportedLocalMediaPath(file.path)) {
 				void this.queueImageReferenceAutoSync([file.path]);
 			}
 		}));
 		this.registerEvent(this.app.vault.on("rename", (file, oldPath) => {
 			if (this.settings.autoSyncMode === "save" && file instanceof TFile
-				&& (isSupportedImagePath(file.path) || isSupportedImagePath(oldPath))) {
+				&& (isSupportedLocalMediaPath(file.path) || isSupportedLocalMediaPath(oldPath))) {
 				void this.queueImageReferenceAutoSync([oldPath, file.path]);
 			}
 		}));

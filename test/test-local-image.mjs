@@ -7,11 +7,18 @@ import {
 	buildMediaInsertArgs,
 	buildMediaMoveArgs,
 	buildPlaceholderRemoveArgs,
+	buildLocalImageFileIndex,
+	buildLocalMediaFileIndex,
 	buildSyncPlan,
+	containsLocalImagePlaceholders,
 	createSyncContentSignature,
 	createMediaUploadJournal,
 	findReferencingMarkdownFiles,
 	invalidateLocalImageSyncState,
+	isLocalVideoPlaceholder,
+	isSupportedImagePath,
+	isSupportedVideoPath,
+	isSupportedLocalMediaPath,
 	materializeLocalImages,
 	prepareLocalImages,
 	scanLocalImageReferences
@@ -372,6 +379,177 @@ try {
 	assert.equal(imageState.contentHash, "");
 	assert.equal(imageState.units[0].hash, "body");
 	assert.equal(imageState.units[1].hash, "");
+
+	// Local video embeds use preview files; links, remote URLs and code remain untouched.
+	const videoPath = join(workspace, "assets", "clip.mp4");
+	const videoBytes = Buffer.alloc(150_000, 0x61);
+	await writeFile(videoPath, videoBytes);
+	const videoMarkdown = [
+		"![[clip.mp4]]",
+		"",
+		"![片段](../assets/clip.mp4)",
+		"",
+		"[下载视频](../assets/clip.mp4)",
+		"![](https://example.com/clip.mp4)",
+		"![[https://example.com/clip.mp4]]",
+		"![](//example.com/clip.mp4)",
+		"![](file:///tmp/clip.mp4)",
+		"`![[clip.mp4]]`",
+		"`![](../assets/clip.mp4)`",
+		"`before ``` ![[clip.mp4]] after`",
+		"``before ` ![[clip.mp4]] after``",
+		"\\![[clip.mp4]]",
+		"```md",
+		"![[clip.mp4]]",
+		"```"
+	].join("\n");
+	assert.equal(scanLocalImageReferences(videoMarkdown).length, 2);
+	assert.equal(isSupportedImagePath("clip.mp4"), false);
+	assert.equal(isSupportedVideoPath("clip.MP4"), true);
+	assert.equal(isSupportedLocalMediaPath("clip.webm"), true);
+	assert.equal(isSupportedLocalMediaPath("clip.mkv"), false);
+	const preparedVideos = await prepareLocalImages({
+		vaultRoot: workspace, markdownPath: "notes/videos.md", content: videoMarkdown
+	});
+	assert.equal(preparedVideos.images.length, 2);
+	const video = preparedVideos.images[0];
+	assert.equal(video.mediaType, "video");
+	assert.equal(video.mimeType, "video/mp4");
+	assert.equal(video.vaultPath, "assets/clip.mp4");
+	assert.equal(video.contentHash, createHash("sha256").update(videoBytes).digest("hex"));
+	assert.equal(isLocalVideoPlaceholder(video.placeholder), true);
+	assert.equal(containsLocalImagePlaceholders(preparedVideos.content), true);
+	assert.match(preparedVideos.content, /\[下载视频\]\(\.\.\/assets\/clip\.mp4\)/);
+	const imageIndex = await buildLocalImageFileIndex(workspace);
+	const mediaIndex = await buildLocalMediaFileIndex(workspace);
+	assert.equal(imageIndex.paths.has("assets/clip.mp4"), false, "the image gallery index stays image-only");
+	assert.equal(mediaIndex.paths.has("assets/clip.mp4"), true);
+	assert.equal(imageIndex.paths.has("root.png"), true);
+	const sameVideo = await prepareLocalImages({
+		vaultRoot: workspace, markdownPath: "notes/videos.md", content: "修改正文\n\n![[clip.mp4|600]]"
+	});
+	assert.equal(sameVideo.images[0].placeholder, video.placeholder, "body and display width do not reupload a video");
+	const duplicateVideos = await prepareLocalImages({
+		vaultRoot: workspace, markdownPath: "notes/videos.md", content: "![[clip.mp4|600]]\n\n![[clip.mp4|800]]"
+	});
+	assert.notEqual(duplicateVideos.images[0].placeholder, duplicateVideos.images[1].placeholder);
+	for (const [extension, mimeType] of [["mov", "video/quicktime"], ["m4v", "video/mp4"], ["webm", "video/webm"]]) {
+		await writeFile(join(workspace, "assets", `clip.${extension}`), videoBytes);
+		const fixture = await prepareLocalImages({
+			vaultRoot: workspace, markdownPath: "notes/videos.md", content: `![[clip.${extension}]]`
+		});
+		assert.equal(fixture.images[0].mimeType, mimeType);
+	}
+	await writeFile(join(workspace, "notes", "videos.md"), videoMarkdown);
+	assert.deepEqual(await findReferencingMarkdownFiles({
+		vaultRoot: workspace, markdownPaths: ["notes/videos.md"], changedImagePaths: ["assets/clip.mp4"]
+	}), ["notes/videos.md"]);
+	const videoArgs = buildMediaInsertArgs("doc-token", video);
+	assert.equal(videoArgs[videoArgs.indexOf("--type") + 1], "file");
+	assert.equal(videoArgs[videoArgs.indexOf("--file-view") + 1], "preview");
+	assert.equal(videoArgs[videoArgs.indexOf("--file") + 1], "./clip.mp4");
+	assert.ok(!videoArgs.includes("--width") && !videoArgs.includes("--height") && !videoArgs.includes("--caption"));
+
+	const figureXml = '<figure id="video-view" view-type="Preview"><source id="video-file" mime="video/mp4" token="existing-token"/></figure>';
+	let videoRemote = `<p id="video-slot">${video.placeholder}</p><p id="tail">后续</p>`;
+	let videoUploads = 0;
+	const videoMoves = [];
+	const videoHost = {
+		async fetchRemoteWithIds() { return { content: videoRemote, revisionId: 3 }; },
+		async insertImage() {
+			videoUploads += 1;
+			videoRemote += figureXml;
+			return { blockId: "video-file" };
+		},
+		async moveBlockAfter(blockId, targetBlockId) {
+			videoMoves.push([blockId, targetBlockId]);
+			videoRemote = videoRemote.replace(figureXml, "")
+				.replace(`</p><p id="tail">`, `</p>${figureXml}<p id="tail">`);
+		},
+		async deleteBlock(blockId) {
+			videoRemote = videoRemote.replace(new RegExp(`<p id="${blockId}">[^<]+</p>`), "");
+		},
+		async removePlaceholder() { assert.fail("a standalone placeholder is removed by block id"); }
+	};
+	const videoSnapshot = await materializeLocalImages([video], videoHost);
+	assert.deepEqual(videoMoves, [["video-view", "video-slot"]], "move the figure rather than its source");
+	assert.equal(videoSnapshot.content, `${figureXml}<p id="tail">后续</p>`);
+	await materializeLocalImages([video], videoHost);
+	assert.equal(videoUploads, 1, "an already materialized video is never uploaded again");
+	assert.equal(videoMoves.length, 1);
+	for (const [index, invalidFigure] of [figureXml.replace('"Preview"', '"Card"'), figureXml.replace('video/mp4', 'application/pdf')].entries()) {
+		let invalidUploads = 0;
+		const invalidHost = {
+			...videoHost,
+			uploadJournal: createMediaUploadJournal(journalDirectory, `invalid-video-${index}`),
+			async fetchRemoteWithIds() { return { content: `<p id="slot">${video.placeholder}</p>${invalidFigure}` }; },
+			async insertImage() { invalidUploads += 1; return { blockId: "video-file" }; },
+			async moveBlockAfter() { assert.fail("a generic file card is not a video preview"); }
+		};
+		await assert.rejects(materializeLocalImages([video], invalidHost), /未返回可播放的预览块/);
+		await assert.rejects(materializeLocalImages([video], invalidHost), /未返回可播放的预览块/);
+		assert.equal(invalidUploads, 1, "an existing unsupported preview must not be uploaded again on retry");
+		assert.equal(await invalidHost.uploadJournal.load(video), "video-file");
+	}
+
+	// Persist the raw source id before the first read, and reuse it or the figure id after a restart.
+	for (const failureStage of ["fetch", "move"]) {
+		const anchor = `<p id="video-slot">${video.placeholder}</p>`;
+		videoRemote = `${anchor}<p id="tail">后续</p>`;
+		let interrupted = false;
+		const uploadJournal = createMediaUploadJournal(journalDirectory, `video-${failureStage}`);
+		const uploadsBefore = videoUploads;
+		const interruptedVideoHost = {
+			...videoHost,
+			uploadJournal,
+			async fetchRemoteWithIds() {
+				if (failureStage === "fetch" && !interrupted && videoRemote.includes(figureXml)) {
+					interrupted = true;
+					throw new Error("interrupted after upload");
+				}
+				return { content: videoRemote, revisionId: 4 };
+			},
+			async moveBlockAfter(blockId, targetBlockId) {
+				if (failureStage === "move" && !interrupted) {
+					interrupted = true;
+					throw new Error("interrupted before move");
+				}
+				await videoHost.moveBlockAfter(blockId, targetBlockId);
+			}
+		};
+		await assert.rejects(materializeLocalImages([video], interruptedVideoHost), /interrupted/);
+		assert.equal(await uploadJournal.load(video), failureStage === "fetch" ? "video-file" : "video-view");
+		await materializeLocalImages([video], {
+			...interruptedVideoHost,
+			uploadJournal: createMediaUploadJournal(journalDirectory, `video-${failureStage}`)
+		});
+		assert.equal(videoUploads, uploadsBefore + 1, "a resumed video reuses its recorded upload");
+		assert.equal(await uploadJournal.load(video), undefined);
+		assert.equal(videoRemote, `${figureXml}<p id="tail">后续</p>`);
+	}
+	videoRemote = `<p id="video-slot">${video.placeholder}</p>`;
+	const staleVideoJournal = createMediaUploadJournal(journalDirectory, "stale-video");
+	await staleVideoJournal.save(video, "deleted-video");
+	await materializeLocalImages([video], {
+		...videoHost,
+		uploadJournal: staleVideoJournal,
+		async moveBlockAfter() { assert.fail("a trailing video is already adjacent to its placeholder"); }
+	});
+	assert.equal(videoRemote, figureXml);
+	assert.equal(await staleVideoJournal.load(video), undefined);
+	await writeFile(videoPath, Buffer.from("updated-video-content"));
+	const changedVideo = await prepareLocalImages({
+		vaultRoot: workspace, markdownPath: "notes/videos.md", content: "![[clip.mp4]]"
+	});
+	assert.notEqual(changedVideo.images[0].contentHash, video.contentHash);
+	assert.notEqual(changedVideo.images[0].placeholder, video.placeholder);
+	await assert.rejects(prepareLocalImages({
+		vaultRoot: workspace, markdownPath: "notes/videos.md", content: "![[missing.mp4]]"
+	}), (error) => error.reason === "video-missing");
+	await writeFile(join(workspace, "empty.mp4"), "");
+	await assert.rejects(prepareLocalImages({
+		vaultRoot: workspace, markdownPath: "notes/videos.md", content: "![[empty.mp4]]"
+	}), (error) => error.reason === "video-empty");
 } finally {
 	await rm(workspace, { recursive: true, force: true });
 }

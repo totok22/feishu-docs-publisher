@@ -41,6 +41,7 @@ import {
 	collectIgnoreDirectories,
 	ignoreFilePath,
 	invalidateLocalImageSyncState,
+	isSupportedLocalMediaPath,
 	isSyncContentSignatureEquivalent,
 	mergeSyncStateFiles,
 	materializeLocalImages,
@@ -137,7 +138,7 @@ async function collectChangedFiles() {
 
 async function collectSyncMarkdownFiles(repoRoot, changedFiles) {
 	const markdownFiles = changedFiles.filter((file) => file.endsWith(".md"));
-	const imageFiles = changedFiles.filter((file) => isSupportedImageFile(file));
+	const imageFiles = changedFiles.filter((file) => isSupportedLocalMediaPath(file));
 	if (imageFiles.length === 0) {
 		return uniqueFiles(markdownFiles);
 	}
@@ -187,10 +188,6 @@ function uniqueFiles(files) {
 	}
 
 	return result;
-}
-
-function isSupportedImageFile(path) {
-	return /\.(?:png|jpe?g|gif|webp|bmp)$/i.test(path);
 }
 
 /** Rule files (.feishuignore) that can apply to these vault paths. One that cannot be read stops the push rather than being skipped. */

@@ -1,9 +1,12 @@
 import { createHash } from "crypto";
+import { createReadStream } from "fs";
 import { readdir, readFile, realpath } from "fs/promises";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "path";
 
 const LOCAL_IMAGE_PLACEHOLDER_PREFIX = "FEISHU_LARK_LOCAL_IMAGE_";
+const LOCAL_VIDEO_PLACEHOLDER_PREFIX = "FEISHU_LARK_LOCAL_VIDEO_";
 const SUPPORTED_IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]);
+const SUPPORTED_VIDEO_EXTENSIONS = new Set([".mp4", ".m4v", ".mov", ".webm"]);
 
 export interface LocalImageReference {
 	sourceSyntax: string;
@@ -16,6 +19,8 @@ export interface LocalImageReference {
 }
 
 export interface LocalImageResource {
+	/** Omitted for images to preserve existing image identities and sync caches. */
+	mediaType?: "video";
 	placeholder: string;
 	sourceSyntax: string;
 	vaultPath: string;
@@ -66,9 +71,17 @@ export class LocalImageError extends Error {
 }
 
 export async function buildLocalImageFileIndex(vaultRoot: string): Promise<LocalImageFileIndex> {
+	return buildLocalFileIndex(vaultRoot, false);
+}
+
+export async function buildLocalMediaFileIndex(vaultRoot: string): Promise<LocalImageFileIndex> {
+	return buildLocalFileIndex(vaultRoot, true);
+}
+
+async function buildLocalFileIndex(vaultRoot: string, includeVideos: boolean): Promise<LocalImageFileIndex> {
 	const paths = new Set<string>();
 	const pathsByBasename = new Map<string, string[]>();
-	await collectImageFiles(vaultRoot, vaultRoot, paths, pathsByBasename);
+	await collectImageFiles(vaultRoot, vaultRoot, paths, pathsByBasename, includeVideos);
 	return { paths, pathsByBasename };
 }
 
@@ -78,23 +91,24 @@ export async function prepareLocalImages(input: PrepareLocalImagesInput): Promis
 		return { content: input.content, images: [] };
 	}
 
-	const imageIndex = input.imageIndex || await buildLocalImageFileIndex(input.vaultRoot);
+	const imageIndex = input.imageIndex || await buildLocalMediaFileIndex(input.vaultRoot);
 	const images: LocalImageResource[] = [];
 	const occurrenceCounts = new Map<string, number>();
 	for (const reference of references) {
 		const vaultPath = resolveLocalImageVaultPath(reference.target, input.markdownPath, imageIndex);
 		if (!vaultPath) {
+			const video = isSupportedVideoPath(decodeImageTarget(reference.target));
 			throw new LocalImageError(
-				"image-missing",
+				video ? "video-missing" : "image-missing",
 				input.markdownPath,
 				reference.sourceSyntax,
-				"找不到本地图片"
+				video ? "找不到本地视频" : "找不到本地图片"
 			);
 		}
 		const occurrenceKey = JSON.stringify({
 			vaultPath,
-			displayWidth: reference.displayWidth,
-			displayHeight: reference.displayHeight,
+			displayWidth: isSupportedVideoPath(vaultPath) ? undefined : reference.displayWidth,
+			displayHeight: isSupportedVideoPath(vaultPath) ? undefined : reference.displayHeight,
 			alt: reference.alt
 		});
 		const occurrenceIndex = occurrenceCounts.get(occurrenceKey) || 0;
@@ -171,6 +185,7 @@ export function collectReferencedLocalImagePaths(
 	const referenced = new Set<string>();
 	for (const note of notes) {
 		for (const reference of scanLocalImageReferences(note.content)) {
+			if (!isSupportedImagePath(decodeImageTarget(reference.target))) continue;
 			try {
 				const vaultPath = resolveLocalImageVaultPath(reference.target, note.path, imageIndex);
 				if (vaultPath) referenced.add(vaultPath);
@@ -186,12 +201,25 @@ export function isLocalImagePlaceholder(content: string): boolean {
 	return new RegExp(`^${LOCAL_IMAGE_PLACEHOLDER_PREFIX}[a-f0-9]{64}$`).test(content.trim());
 }
 
+export function isLocalVideoPlaceholder(content: string): boolean {
+	return new RegExp(`^${LOCAL_VIDEO_PLACEHOLDER_PREFIX}[a-f0-9]{64}$`).test(content.trim());
+}
+
 export function containsLocalImagePlaceholders(content: string): boolean {
-	return content.replace(/\r\n/g, "\n").split("\n").some(isLocalImagePlaceholder);
+	return content.replace(/\r\n/g, "\n").split("\n")
+		.some((line) => isLocalImagePlaceholder(line) || isLocalVideoPlaceholder(line));
 }
 
 export function isSupportedImagePath(path: string): boolean {
 	return SUPPORTED_IMAGE_EXTENSIONS.has(extname(path).toLowerCase());
+}
+
+export function isSupportedVideoPath(path: string): boolean {
+	return SUPPORTED_VIDEO_EXTENSIONS.has(extname(path).toLowerCase());
+}
+
+export function isSupportedLocalMediaPath(path: string): boolean {
+	return isSupportedImagePath(path) || isSupportedVideoPath(path);
 }
 
 function scanLineImageReferences(line: string, lineOffset: number): LocalImageReference[] {
@@ -202,7 +230,9 @@ function scanLineImageReferences(line: string, lineOffset: number): LocalImageRe
 	while ((wikiMatch = wikiPattern.exec(line))) {
 		const sourceSyntax = wikiMatch[0] || "";
 		const target = (wikiMatch[1] || "").trim();
-		if (!target || !isSupportedImagePath(stripQueryAndFragment(target))) {
+		const video = isLocalVideoTarget(target);
+		if (!target || (!isSupportedImagePath(stripQueryAndFragment(target)) && !video)
+			|| (video && isCodeOrEscaped(line, wikiMatch.index))) {
 			continue;
 		}
 		const dimensions = parseWikiImageAlias(wikiMatch[2] || "");
@@ -229,7 +259,9 @@ function scanLineImageReferences(line: string, lineOffset: number): LocalImageRe
 			continue;
 		}
 		const rawTarget = (markdownMatch[2] || "").replace(/^<|>$/g, "");
-		if (/^https?:\/\//i.test(rawTarget) || !isSupportedImagePath(stripQueryAndFragment(rawTarget))) {
+		const video = isLocalVideoTarget(rawTarget);
+		if (/^https?:\/\//i.test(rawTarget) || (!isSupportedImagePath(stripQueryAndFragment(rawTarget)) && !video)
+			|| (video && isCodeOrEscaped(line, relativeStart))) {
 			continue;
 		}
 		const sourceSyntax = markdownMatch[0] || "";
@@ -243,6 +275,33 @@ function scanLineImageReferences(line: string, lineOffset: number): LocalImageRe
 		});
 	}
 	return references;
+}
+
+function isLocalVideoTarget(target: string): boolean {
+	return Boolean(target) && !/^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(target)
+		&& isSupportedVideoPath(decodeImageTarget(target));
+}
+
+function isCodeOrEscaped(line: string, index: number): boolean {
+	let backslashes = 0;
+	for (let offset = index - 1; offset >= 0 && line[offset] === "\\"; offset -= 1) {
+		backslashes += 1;
+	}
+	if (backslashes % 2 === 1) return true;
+	const backtickRuns = [...line.matchAll(/`+/g)];
+	for (let opening = 0; opening < backtickRuns.length; opening += 1) {
+		const start = backtickRuns[opening];
+		if (!start) continue;
+		let closing = opening + 1;
+		while (closing < backtickRuns.length && backtickRuns[closing]?.[0].length !== start[0].length) {
+			closing += 1;
+		}
+		const end = backtickRuns[closing];
+		if (!end) continue;
+		if (index >= start.index && index < end.index + end[0].length) return true;
+		opening = closing;
+	}
+	return false;
 }
 
 function parseWikiImageAlias(alias: string): { width?: number; height?: number; alt?: string } {
@@ -305,6 +364,9 @@ async function readLocalImage(
 		throw new LocalImageError("image-outside-vault", markdownPath, reference.sourceSyntax,
 			"图片解析结果位于 Obsidian vault 外");
 	}
+	if (isSupportedVideoPath(vaultPath)) {
+		return readLocalVideo(absolutePath, markdownPath, reference, vaultPath, occurrenceIndex);
+	}
 	let buffer: Buffer;
 	try {
 		buffer = await readFile(absolutePath);
@@ -340,6 +402,50 @@ async function readLocalImage(
 		sourceHeight: dimensions.height,
 		displayWidth: displayDimensions.width,
 		displayHeight: displayDimensions.height,
+		alt: reference.alt
+	};
+}
+
+async function readLocalVideo(
+	absolutePath: string,
+	markdownPath: string,
+	reference: LocalImageReference,
+	vaultPath: string,
+	occurrenceIndex: number
+): Promise<LocalImageResource> {
+	const hash = createHash("sha256");
+	let size = 0;
+	try {
+		// Hash large video files in chunks rather than loading the whole file into memory.
+		for await (const chunk of createReadStream(absolutePath)) {
+			hash.update(chunk);
+			size += chunk.length;
+		}
+	} catch (error) {
+		throw new LocalImageError("video-read-failed", markdownPath, reference.sourceSyntax,
+			error instanceof Error ? error.message : String(error));
+	}
+	if (size === 0) {
+		throw new LocalImageError("video-empty", markdownPath, reference.sourceSyntax, "本地视频文件为空");
+	}
+	const contentHash = hash.digest("hex");
+	const identity = JSON.stringify({
+		markdownPath: normalizeVaultPath(markdownPath),
+		vaultPath,
+		contentHash,
+		alt: reference.alt,
+		occurrenceIndex
+	});
+	return {
+		mediaType: "video",
+		placeholder: `${LOCAL_VIDEO_PLACEHOLDER_PREFIX}${createHash("sha256").update(identity).digest("hex")}`,
+		sourceSyntax: reference.sourceSyntax,
+		vaultPath,
+		absolutePath,
+		contentHash,
+		mimeType: mimeTypeForExtension(extname(vaultPath).toLowerCase()),
+		sourceWidth: 0,
+		sourceHeight: 0,
 		alt: reference.alt
 	};
 }
@@ -392,7 +498,8 @@ async function collectImageFiles(
 	vaultRoot: string,
 	directory: string,
 	paths: Set<string>,
-	pathsByBasename: Map<string, string[]>
+	pathsByBasename: Map<string, string[]>,
+	includeVideos: boolean
 ): Promise<void> {
 	const entries = await readdir(directory, { withFileTypes: true });
 	for (const entry of entries) {
@@ -401,10 +508,11 @@ async function collectImageFiles(
 		}
 		const absolutePath = join(directory, entry.name);
 		if (entry.isDirectory()) {
-			await collectImageFiles(vaultRoot, absolutePath, paths, pathsByBasename);
+			await collectImageFiles(vaultRoot, absolutePath, paths, pathsByBasename, includeVideos);
 			continue;
 		}
-		if (!entry.isFile() || !isSupportedImagePath(entry.name)) {
+		if (!entry.isFile() || !(isSupportedImagePath(entry.name)
+			|| (includeVideos && isSupportedVideoPath(entry.name)))) {
 			continue;
 		}
 		const vaultPath = normalizeVaultPath(relative(vaultRoot, absolutePath));
@@ -485,7 +593,11 @@ function mimeTypeForExtension(extension: string): string {
 		".jpeg": "image/jpeg",
 		".gif": "image/gif",
 		".webp": "image/webp",
-		".bmp": "image/bmp"
+		".bmp": "image/bmp",
+		".mp4": "video/mp4",
+		".m4v": "video/mp4",
+		".mov": "video/quicktime",
+		".webm": "video/webm"
 	};
 	return mimeTypes[extension] || "application/octet-stream";
 }
