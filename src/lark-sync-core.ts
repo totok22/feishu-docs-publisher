@@ -2,6 +2,7 @@ import { isLocalImagePlaceholder } from "./local-image";
 import { stripImageGalleryMarker } from "./image-gallery";
 
 export { buildPublishedPdfTargets, rewritePublishedPdfLinks } from "./pdf-links";
+export { collectIgnoreDirectories, IGNORE_FILE_NAME, IgnoreRules, ignoreFilePath } from "./ignore-rules";
 
 export {
 	buildLocalImageFileIndex,

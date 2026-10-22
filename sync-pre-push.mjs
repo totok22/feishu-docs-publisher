@@ -37,6 +37,9 @@ import {
 	getDocumentStateKeys,
 	formatSyncFailureMessage,
 	findReferencingMarkdownFiles,
+	IgnoreRules,
+	collectIgnoreDirectories,
+	ignoreFilePath,
 	invalidateLocalImageSyncState,
 	isSyncContentSignatureEquivalent,
 	mergeSyncStateFiles,
@@ -189,7 +192,24 @@ function isSupportedImageFile(path) {
 	return /\.(?:png|jpe?g|gif|webp|bmp)$/i.test(path);
 }
 
+/** Rule files (.feishuignore) that can apply to these vault paths. One that cannot be read stops the push rather than being skipped. */
+async function loadIgnoreRules(repoRoot, vaultRelativePaths) {
+	const rules = new IgnoreRules();
+	for (const dir of collectIgnoreDirectories(vaultRelativePaths)) {
+		try {
+			rules.setFile(dir, await readFile(join(repoRoot, ignoreFilePath(dir)), "utf8"));
+		} catch (error) {
+			if (!isFileNotFoundError(error)) {
+				throw error;
+			}
+		}
+	}
+	return rules;
+}
+
 async function collectSyncTasks(repoRoot, files, settings) {
+	const ignoreRules = await loadIgnoreRules(repoRoot,
+		files.map((file) => relative(repoRoot, resolve(repoRoot, file)).split(sep).join("/")));
 	const tasks = await Promise.all(files.map(async (file) => {
 		const filePath = resolve(repoRoot, file);
 		let content;
@@ -202,7 +222,7 @@ async function collectSyncTasks(repoRoot, files, settings) {
 			throw error;
 		}
 		const vaultRelativePath = relative(repoRoot, filePath).split(sep).join("/");
-		if (settings.disconnectedBindings?.[vaultRelativePath] === true) {
+		if (settings.disconnectedBindings?.[vaultRelativePath] === true || ignoreRules.isIgnored(vaultRelativePath)) {
 			return null;
 		}
 		const persistedBinding = readPersistedBinding(settings, vaultRelativePath);

@@ -210,8 +210,49 @@ await flush();
 assert.equal(syncCount, 1);
 markdown = rows(syncModal).find((setting) => setting.nameEl.textContent === "Alpha");
 assert.equal(action(markdown, "Sync").buttonEl.disabled, false);
-assert.equal(syncModal.feedbackEl.textContent, "Sync completed.");
+assert.equal(syncModal.feedbackEl.textContent, 'Synced "Alpha".');
+assert.ok(!syncModal.feedbackEl.classes.has("is-busy"));
 syncModal.close();
+
+// A running sync says what is being synced and which step it is on, and the status line shows it as busy.
+let release;
+const gate = new Promise((resolve) => { release = resolve; });
+let reportStep;
+const progressModal = new PublishedLinksModal({}, {
+	...host, sync: async (_entry, report) => { reportStep = report; report("Reading 3 notes…"); await gate; }
+}, "docs");
+progressModal.open();
+await flush();
+const folderRow = rows(progressModal)[0];
+action(folderRow, "Sync").activate();
+await flush();
+assert.match(progressModal.feedbackEl.textContent, /^Syncing folder "docs" to Feishu…/);
+assert.match(progressModal.feedbackEl.textContent, /progress also shows in the notification at the top right/);
+assert.match(progressModal.feedbackEl.textContent, /\nReading 3 notes…$/, "the current step sits under the main line");
+assert.ok(progressModal.feedbackEl.classes.has("is-busy"));
+reportStep("Uploading PDF 1/2: manual.pdf");
+assert.match(progressModal.feedbackEl.textContent, /\nUploading PDF 1\/2: manual\.pdf$/, "a newer step replaces the older one");
+release();
+await flush();
+await flush();
+assert.equal(progressModal.feedbackEl.textContent, 'Synced "docs".');
+assert.ok(!progressModal.feedbackEl.classes.has("is-busy"));
+reportStep("late step");
+assert.equal(progressModal.feedbackEl.textContent, 'Synced "docs".', "a step reported after the sync finished is ignored");
+progressModal.close();
+let releaseFile;
+const fileGate = new Promise((resolve) => { releaseFile = resolve; });
+const fileProgress = new PublishedLinksModal({}, { ...host, sync: async () => { await fileGate; } }, "docs");
+fileProgress.open();
+await flush();
+fileProgress.query = "Alpha";
+fileProgress.renderList();
+action(rows(fileProgress).find((setting) => setting.nameEl.textContent === "Alpha"), "Sync").activate();
+await flush();
+assert.equal(fileProgress.feedbackEl.textContent, 'Syncing "Alpha" to Feishu…');
+releaseFile();
+await flush();
+fileProgress.close();
 
 // Stored links with active-content schemes cannot reach the browser callback.
 const unsafeModal = new PublishedLinksModal({}, {

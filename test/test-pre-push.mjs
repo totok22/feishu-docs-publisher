@@ -62,6 +62,7 @@ async function run() {
 		await testUnboundFilesDoNotBlock(workspace);
 		await testDisconnectedBindingsBlockLegacyFrontmatter(workspace);
 		await testFalseAndUnrelatedTombstonesDoNotBlock(workspace);
+		await testIgnoreFilesAreSkipped(workspace);
 		await testPersistedBindingWithoutFrontmatter(workspace);
 		await testPersistedBindingTakesPriority(workspace);
 		await testPersistedBindingUsesVaultRelativePaths(workspace);
@@ -1109,6 +1110,52 @@ async function testDisconnectedBindingsBlockLegacyFrontmatter(workspace) {
 		assert.deepEqual(await readSyncState(workspace), stateBefore);
 	} finally {
 		await rm(join(workspace, "disconnected"), { recursive: true, force: true });
+		await execFileAsync("git", ["add", "--all"], { cwd: workspace });
+	}
+}
+
+async function testIgnoreFilesAreSkipped(workspace) {
+	await resetWorkspaceFiles(workspace);
+	const nestedPath = "ignored/notes/笔记.md";
+	const nestedContent = boundMarkdownWithToken("nested-token", "https://example.feishu.cn/docx/nested-token", "Ignored folder");
+	await mkdir(join(workspace, "ignored", "notes"), { recursive: true });
+	await writeFile(join(workspace, nestedPath), nestedContent);
+	await execFileAsync("git", ["add", "--all"], { cwd: workspace });
+	const rulesAt = (dir) => join(workspace, dir, ".feishuignore");
+	const runWithRules = async (files) => {
+		for (const [dir, content] of Object.entries(files)) await writeFile(rulesAt(dir), content);
+		await writeSettings(workspace, { syncStrategy: "overwrite", updateFrontmatter: false });
+		await writeSyncStateRaw(workspace, { version: 1, documents: {} });
+		await clearLog(workspace);
+		await runHook(workspace);
+		const log = await readLog(workspace);
+		for (const dir of Object.keys(files)) await rm(rulesAt(dir), { force: true });
+		return log;
+	};
+	try {
+		// A rule file in the vault root, or in the folder itself, keeps bound notes out of the push.
+		assert.equal(await runWithRules({ "": "/bound.md\n/ignored/\n" }), "");
+		assert.equal(await runWithRules({ "": "/bound.md\n", ignored: "notes/\n" }), "");
+		assert.equal(await runWithRules({ "": "*.md\n" }), "", "wildcards apply");
+		// "!" brings a note back; the other note stays ignored by the wildcard.
+		const partial = await runWithRules({ "": "*.md\n!/bound.md\n" });
+		assert.match(partial, /docs \+update .*--doc https:\/\/example\.feishu\.cn\/docx\/doc-token/);
+		assert.doesNotMatch(partial, /nested-token/);
+		// Rules that match nothing hide nothing.
+		assert.match(await runWithRules({ "": "/bound.md.bak\nignore/\n# /bound.md\n" }),
+			/docs \+update .*--doc https:\/\/example\.feishu\.cn\/docx\/doc-token/);
+
+		// A rule file that cannot be read stops the push: syncing without knowing the rules could publish ignored notes.
+		await mkdir(rulesAt(""));
+		await writeSettings(workspace, { syncStrategy: "overwrite", updateFrontmatter: false });
+		await writeSyncStateRaw(workspace, { version: 1, documents: {} });
+		await clearLog(workspace);
+		const result = await runHook(workspace, { reject: false });
+		assert.notEqual(result.exitCode, 0);
+		assert.equal(await readLog(workspace), "");
+	} finally {
+		await rm(rulesAt(""), { recursive: true, force: true });
+		await rm(join(workspace, "ignored"), { recursive: true, force: true });
 		await execFileAsync("git", ["add", "--all"], { cwd: workspace });
 	}
 }

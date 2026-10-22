@@ -146,6 +146,9 @@ import { PublishedLinkBindingModal, PublishedLinkEntry, PublishedLinksHost, Publ
 import { createPdfBindingKey, PdfBinding, PdfPublishParent, publishPdf } from "./pdf-publish";
 import { buildPublishedPdfTargets, rewritePublishedPdfLinks } from "./pdf-links";
 import { SyncQueue } from "./sync-queue";
+import { collectIgnoreDirectories, IgnoreRules, ignoreFilePath } from "./ignore-rules";
+import { VaultNodeLike } from "./sync-ignore";
+import { SYNC_IGNORE_VIEW_TYPE, SyncIgnoreHost, SyncIgnoreView } from "./sync-ignore-view";
 
 const execFileAsync = promisify(execFile);
 
@@ -492,6 +495,8 @@ const MESSAGES = {
 		menuManagePublishedLinks: "已发布文件",
 		menuOpenPublishedLink: "打开飞书链接",
 		menuEditPublishedLink: "设置飞书链接",
+		menuSyncIgnore: "选择忽略的文件",
+		commandOpenSyncIgnore: "选择同步时忽略的文件",
 		invalidPublishedLink: "请输入此文件或文件夹的飞书链接。",
 		commandSyncCurrentNote: "同步到飞书",
 		commandOverwriteCurrentNote: "覆盖同步到飞书",
@@ -504,6 +509,15 @@ const MESSAGES = {
 		noticeOverwriteSyncingToLark: "正在覆盖同步到飞书...",
 		noticePublishingFolderToLark: "正在发布目录到飞书...",
 		noticeNoMarkdownFilesInFolder: "该目录下没有 Markdown、PDF 或图片文件。",
+		noticeAllFilesIgnoredInFolder: "该目录下的文件都被设为忽略，没有可同步的内容。",
+		progressFolderScan: "正在检查文件夹里的笔记、PDF 和图片…",
+		progressFolderFiles: "共 {count} 个文件待同步。",
+		progressFolderFilesIgnored: "共 {count} 个文件待同步，{ignored} 个被 .feishuignore 忽略。",
+		progressFolderRead: "正在读取 {count} 篇笔记，并检查飞书上的目录…",
+		progressFolderDocs: "正在创建或匹配 {count} 篇笔记对应的飞书文档…",
+		progressFolderPdf: "正在上传 PDF {current}/{total}：{name}",
+		progressFolderContent: "正在同步 {count} 篇笔记的内容…",
+		progressFolderPages: "正在整理目录页…",
 		noticeDeletingMissingRemote: "正在删除本地已不存在的飞书文件...",
 		noticeDeletedMissingRemote: "已删除 {count} 个本地已不存在的飞书文件。",
 		noticeSkippedMissingRemote: "有 {count} 个飞书文档下还有子页面，已跳过未删除。",
@@ -632,6 +646,9 @@ const MESSAGES = {
 		autoSyncModePrePush: "Git pre-push hook",
 		settingAutoSyncDelayName: "保存后同步延迟",
 		settingAutoSyncDelayDesc: "文件保存后等待多少秒再同步，用于合并连续编辑。",
+		settingSyncIgnoreName: "同步忽略",
+		settingSyncIgnoreDesc: "选一个同步文件夹，再选择其中要跳过的文件或子文件夹。选择会保存在该文件夹的 .feishuignore 文件中（写法同 .gitignore）。目录同步、保存时自动同步和 Git pre-push 都会跳过它们，已在飞书上的内容不会被删除。",
+		openSyncIgnoreButton: "选择…",
 		settingDeleteMissingRemoteName: "删除本地已不存在的飞书文件",
 		settingDeleteMissingRemoteDesc: "同步目录后，把本插件发布过、但本地文件已不存在的飞书文档和 PDF 删除，删除前会列出清单让你确认。只处理有发布记录的文件，不会动你在飞书里手动创建的内容。",
 		settingStateCacheName: "同步状态缓存",
@@ -650,6 +667,8 @@ const MESSAGES = {
 		menuManagePublishedLinks: "Published files",
 		menuOpenPublishedLink: "Open Feishu/Lark link",
 		menuEditPublishedLink: "Set Feishu/Lark link",
+		menuSyncIgnore: "Choose files to ignore",
+		commandOpenSyncIgnore: "Choose files to ignore when syncing",
 		invalidPublishedLink: "Enter the matching Feishu/Lark document, PDF, or folder URL.",
 		commandSyncCurrentNote: "Sync to Feishu/Lark",
 		commandOverwriteCurrentNote: "Overwrite sync to Feishu/Lark",
@@ -662,6 +681,15 @@ const MESSAGES = {
 		noticeOverwriteSyncingToLark: "Overwriting to Lark...",
 		noticePublishingFolderToLark: "Publishing folder to Lark...",
 		noticeNoMarkdownFilesInFolder: "No Markdown, PDF, or image files found in this folder.",
+		noticeAllFilesIgnoredInFolder: "Every file in this folder is ignored, so there is nothing to sync.",
+		progressFolderScan: "Checking the notes, PDFs, and images in the folder…",
+		progressFolderFiles: "{count} files to sync.",
+		progressFolderFilesIgnored: "{count} files to sync, {ignored} ignored by .feishuignore.",
+		progressFolderRead: "Reading {count} notes and checking the folders in Feishu…",
+		progressFolderDocs: "Creating or matching Feishu documents for {count} notes…",
+		progressFolderPdf: "Uploading PDF {current}/{total}: {name}",
+		progressFolderContent: "Syncing the content of {count} notes…",
+		progressFolderPages: "Updating folder pages…",
 		noticeDeletingMissingRemote: "Deleting Feishu/Lark files that no longer exist locally...",
 		noticeDeletedMissingRemote: "Deleted {count} Feishu/Lark files that no longer exist locally.",
 		noticeSkippedMissingRemote: "Skipped {count} documents that still have child pages.",
@@ -790,6 +818,9 @@ const MESSAGES = {
 		autoSyncModePrePush: "Git pre-push hook",
 		settingAutoSyncDelayName: "Save sync delay",
 		settingAutoSyncDelayDesc: "Seconds to wait after a save before syncing, used to merge continuous edits.",
+		settingSyncIgnoreName: "Sync ignore",
+		settingSyncIgnoreDesc: "Pick a sync folder, then choose the files and subfolders inside it to skip. Choices are saved to a .feishuignore file in that folder, written like .gitignore. Folder sync, auto-sync on save, and the Git pre-push hook leave them out; content already in Feishu/Lark is not deleted.",
+		openSyncIgnoreButton: "Choose…",
 		settingDeleteMissingRemoteName: "Delete remote files missing locally",
 		settingDeleteMissingRemoteDesc: "After a folder sync, delete Feishu/Lark documents and PDFs this plugin published whose local file no longer exists. You confirm a list first. Only files with a publish record are touched; content you created by hand in Feishu/Lark is never deleted.",
 		settingStateCacheName: "Sync state cache",
@@ -836,6 +867,7 @@ export default class LarkCliSyncPlugin extends Plugin {
 	private larkCliActiveRequestCount = 0;
 	private lastLarkCliRequestAt = 0;
 	private operationQueue = new SyncQueue();
+	private ignoreRules = new IgnoreRules();
 	private settingsWriteQueue = new SyncQueue();
 	private hasUnsavedSettings = false;
 	private syncState: LarkSyncStateFile = createEmptySyncStateFile();
@@ -877,6 +909,9 @@ export default class LarkCliSyncPlugin extends Plugin {
 
 		this.addCommand({ id: "manage-published-links", name: this.t("menuManagePublishedLinks"),
 			callback: () => this.openPublishedLinks() });
+		this.registerView(SYNC_IGNORE_VIEW_TYPE, (leaf) => new SyncIgnoreView(leaf, this.syncIgnoreHost()));
+		this.addCommand({ id: "open-sync-ignore", name: this.t("commandOpenSyncIgnore"),
+			callback: () => { void this.openSyncIgnore(); } });
 		this.addCommand({ id: "open-current-published-link", name: this.t("menuOpenPublishedLink"),
 			checkCallback: (checking) => {
 				const file = this.app.workspace.getActiveFile();
@@ -902,6 +937,8 @@ export default class LarkCliSyncPlugin extends Plugin {
 					.onClick(() => { void this.publishFolder(file.path); }));
 				menu.addItem((item) => item.setTitle(this.t("menuOverwriteSyncToLark")).setIcon("replace")
 					.onClick(() => { void this.publishFolder(file.path, true); }));
+				menu.addItem((item) => item.setTitle(`Lark: ${this.t("menuSyncIgnore")}`).setIcon("eye-off")
+					.onClick(() => { void this.openSyncIgnore(file.path); }));
 			} else if (file instanceof TFile && file.extension.toLowerCase() === "md") {
 				kind = "markdown";
 				menu.addItem((item) => {
@@ -1763,6 +1800,10 @@ export default class LarkCliSyncPlugin extends Plugin {
 		this.autoSyncRunningPaths.add(file.path);
 		this.autoSyncPendingPaths.delete(file.path);
 		try {
+			await this.refreshIgnoreRules([file.path]);
+			if (this.isSyncIgnored(file.path)) {
+				return;
+			}
 			await this.syncFileInternal(file, {
 				allowCreate: false,
 				openAfterSync: false,
@@ -2234,14 +2275,16 @@ exec "${nodePath}" "${scriptPath}" "$@"
 	}
 
 	private async publishFolder(folderPath: string, overwrite = false): Promise<void> {
-		const synced = await this.runWithNotice(this.t(overwrite ? "noticeOverwriteSyncingToLark" : "noticePublishingFolderToLark"),
-			() => this.publishFolderInternal(folderPath, overwrite));
+		const base = this.t(overwrite ? "noticeOverwriteSyncingToLark" : "noticePublishingFolderToLark");
+		const synced = await this.runWithNotice(base, (notice) => this.publishFolderInternal(folderPath, overwrite,
+			(message) => notice.setMessage(`${base}\n${message}`)));
 		if (synced) await this.cleanupMissingRemoteFiles(folderPath);
 	}
 
 	/** Offer to delete remote files this plugin published whose local file is gone. */
 	private async cleanupMissingRemoteFiles(folderPath: string): Promise<void> {
 		if (!this.settings.deleteMissingRemote) return;
+		await this.refreshIgnoreRules(this.publishedPathsWithin(folderPath));
 		const missing = this.findMissingRemoteFiles(folderPath);
 		if (missing.length === 0 || !await this.confirmDeleteMissingRemote(missing)) return;
 		await this.runWithNotice(this.t("noticeDeletingMissingRemote"), () =>
@@ -2278,7 +2321,8 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			documentBindings: this.settings.documentBindings || {},
 			pdfBindings: this.settings.pdfBindings || {},
 			localFileExists: (path) => !!this.app.vault.getAbstractFileByPath(path),
-			isDisconnected: (path) => this.isFolderDisconnected(path) || !!this.settings.disconnectedBindings?.[path],
+			isDisconnected: (path) => this.isFolderDisconnected(path) || !!this.settings.disconnectedBindings?.[path]
+				|| this.isSyncIgnored(path),
 			liveAliases,
 			aliasesOf: (binding) => this.getBindingAliases({ ...binding })
 		});
@@ -2287,6 +2331,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 	private async deleteMissingRemoteFiles(folderPath: string, planned: MissingRemoteFile[]): Promise<void> {
 		// Recompute inside the queue: a file may have reappeared since the user confirmed.
 		const confirmed = new Set(planned.map((file) => file.token));
+		await this.refreshIgnoreRules(this.publishedPathsWithin(folderPath));
 		let deleted = 0, skipped = 0;
 		const failures: string[] = [];
 		for (const target of this.findMissingRemoteFiles(folderPath).filter((file) => confirmed.has(file.token))) {
@@ -2355,20 +2400,30 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		if (binding) this.removeSyncStateForBinding(binding);
 	}
 
-	private async publishFolderInternal(folderPath: string, overwrite = false): Promise<void> {
+	private async publishFolderInternal(folderPath: string, overwrite = false, onProgress?: (message: string) => void): Promise<void> {
 		await (this.operationQueue ??= new SyncQueue()).run(() => this.withDeferredLarkSyncStateSave(async () => {
+			onProgress?.(this.t("progressFolderScan"));
 			if (this.hasUnsavedSettings) await this.saveSettingsWithoutClearingCommandCache();
 			const reconnected = clearDisconnectedFolderPaths(this.settings.disconnectedFolders ??= {}, folderPath);
+			await this.refreshIgnoreRules([`${folderPath}/`, ...this.app.vault.getFiles()
+				.filter((file) => this.isPathWithin(file.path, folderPath)).map((file) => file.path)]);
 			const createdGalleries = await this.ensureImageGalleryNotes(folderPath);
-			const files = this.collectMarkdownFiles(folderPath).filter((file) => !this.isFolderDisconnected(file.path));
-			const pdfFiles = this.app.vault.getFiles().filter((file) => file.extension.toLowerCase() === "pdf"
+			const notes = this.collectMarkdownFiles(folderPath).filter((file) => !this.isFolderDisconnected(file.path));
+			const pdfs = this.app.vault.getFiles().filter((file) => file.extension.toLowerCase() === "pdf"
 				&& this.isPathWithin(file.path, folderPath) && !this.isFolderDisconnected(file.path));
+			const files = notes.filter((file) => !this.isSyncIgnored(file.path));
+			const pdfFiles = pdfs.filter((file) => !this.isSyncIgnored(file.path));
+			const ignoredCount = notes.length + pdfs.length - files.length - pdfFiles.length;
 			if (files.length + pdfFiles.length === 0) {
 				if (reconnected) await this.saveSettingsWithoutClearingCommandCache();
-				new Notice(this.t("noticeNoMarkdownFilesInFolder"));
+				new Notice(this.t(this.hasIgnoredContent(folderPath) ? "noticeAllFilesIgnoredInFolder" : "noticeNoMarkdownFilesInFolder"));
 				return;
 			}
 
+			const total = String(files.length + pdfFiles.length);
+			onProgress?.(ignoredCount > 0
+				? this.t("progressFolderFilesIgnored", { count: total, ignored: String(ignoredCount) })
+				: this.t("progressFolderFiles", { count: total }));
 			const entries: FolderPublishEntry[] = [];
 			const folderRoot = this.settings.publishedFolders[this.normalizeLinkPath(folderPath)]?.remoteRoot
 				?? this.getSelectedFolderName(folderPath);
@@ -2376,6 +2431,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 				|| await this.resolveRemoteRootParent();
 			this.savePublishedFolderBinding(folderPath, rootParent, folderRoot);
 			await this.saveSettingsWithoutClearingCommandCache();
+			onProgress?.(this.t("progressFolderRead", { count: String(files.length) }));
 			const preparedFiles = await Promise.all(files.map(async (file) => {
 				const preparedContent = await this.readNoteForLark(file);
 				const binding = this.getBinding(file);
@@ -2408,17 +2464,20 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			});
 
 			const preparedFileGroups = this.groupPreparedFilesByDocument(indexedPreparedFiles);
+			onProgress?.(this.t("progressFolderDocs", { count: String(files.length) }));
 			await this.runWithConcurrency(preparedFileGroups, FOLDER_SYNC_PARALLEL_LIMIT, async (preparedFileGroup) => {
 				for (const item of preparedFileGroup) {
 					await this.prepareFolderEntry(item, entries, folderRoot, rootParent, parentsByPath);
 				}
 			});
 
-			for (const file of pdfFiles) {
+			for (const [index, file] of pdfFiles.entries()) {
+				onProgress?.(this.t("progressFolderPdf", { current: String(index + 1), total: String(pdfFiles.length), name: file.name }));
 				const remotePath = this.getRemoteParentPath(folderPath, file, folderRoot);
 				const { parent } = await this.ensureRemoteFolderPath(rootParent, remotePath);
 				await this.syncPdfFileUnlocked(file, parent, overwrite);
 			}
+			onProgress?.(this.t("progressFolderContent", { count: String(entries.length) }));
 			await this.syncFolderEntries(folderPath, folderRoot, entries, overwrite);
 			if (overwrite) {
 				for (const entry of entries) {
@@ -2429,6 +2488,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 					}
 				}
 			}
+			onProgress?.(this.t("progressFolderPages"));
 			await this.syncFolderPageLists(folderPath, folderRoot, rootParent, overwrite);
 			this.savePublishedFolderBinding(folderPath, rootParent, folderRoot);
 			await this.saveSettings();
@@ -2445,9 +2505,11 @@ exec "${nodePath}" "${scriptPath}" "$@"
 	 */
 	private async ensureImageGalleryNotes(folderPath: string): Promise<number> {
 		const images = this.app.vault.getFiles().filter((file) => isSupportedImagePath(file.path)
-			&& this.isPathWithin(file.path, folderPath) && !this.isFolderDisconnected(file.path));
+			&& this.isPathWithin(file.path, folderPath) && !this.isFolderDisconnected(file.path)
+			&& !this.isSyncIgnored(file.path));
 		if (images.length === 0) return 0;
 
+		// Ignored notes stay in the list: they still occupy their paths and still embed images that must not be re-collected.
 		const notes = await Promise.all(this.collectMarkdownFiles(folderPath)
 			.filter((file) => !this.isFolderDisconnected(file.path))
 			.map(async (file) => ({ file, content: await this.app.vault.read(file) })));
@@ -2464,6 +2526,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 
 		let created = 0;
 		for (const plan of plans) {
+			if (this.isSyncIgnored(plan.notePath)) continue;
 			if (!plan.exists) {
 				this.selfWrittenPaths.set(plan.notePath, Date.now());
 				await this.app.vault.create(plan.notePath, buildImageGalleryBody(plan.imagePaths));
@@ -2493,7 +2556,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			if (kind !== "wiki" && kind !== "my_library") continue;
 			const suffix = remotePath.slice(root.length).replace(/^\/+/, "");
 			const localPath = [folderPath, suffix].filter(Boolean).join("/");
-			if (this.isFolderDisconnected(localPath)) continue;
+			if (this.isFolderDisconnected(localPath) || this.isSyncIgnored(localPath)) continue;
 			this.assertRemoteBindingExclusive(localPath, binding);
 			const parentBinding = this.settings.folderBindings[this.getFolderBindingKey(rootParent, this.parentPath(remotePath))];
 			const parent = { kind, token: binding.containerToken ?? parentBinding?.token ?? rootParent.token };
@@ -2511,7 +2574,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 				|| !this.isPathWithin(remotePath, remoteRoot)) continue;
 			const suffix = remotePath.slice(remoteRoot.length).replace(/^\/+/, "");
 			const localPath = [folderPath, suffix].filter(Boolean).join("/");
-			if (this.isFolderDisconnected(localPath)) continue;
+			if (this.isFolderDisconnected(localPath) || this.isSyncIgnored(localPath)) continue;
 			const kind = binding.containerKind || rootParent.kind;
 			if (kind !== "wiki" && kind !== "my_library" && !binding.url.includes("/wiki/")) continue;
 			await this.ensureFolderPageList(binding, localPath, overwrite);
@@ -5243,12 +5306,21 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		await this.saveLarkSyncState();
 	}
 
-	private async runWithNotice(message: string, callback: () => Promise<void>): Promise<boolean> {
+	private async runWithNotice(message: string, callback: (notice: Notice) => Promise<void>): Promise<boolean> {
+		try {
+			await this.runWithProgressNotice(message, callback);
+			return true;
+		} catch {
+			return false;
+		}
+	}
+
+	/** Keep a notice at the top right while the work runs, and report a failure there too before rethrowing it. */
+	private async runWithProgressNotice<T>(message: string, callback: (notice: Notice) => Promise<T>): Promise<T> {
 		const notice = new Notice(message, 0);
 
 		try {
-			await callback();
-			return true;
+			return await callback(notice);
 		} catch (error) {
 			const errorMessage = error instanceof Error ? error.message : String(error);
 			const noticeMessage = error instanceof LocalizedSyncError
@@ -5256,7 +5328,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 				: this.t("noticeSyncFailed", { message: errorMessage });
 			new Notice(noticeMessage, 10000);
 			console.error("[Feishu Docs Publisher] operation failed", error);
-			return false;
+			throw error;
 		} finally {
 			notice.hide();
 		}
@@ -5278,6 +5350,60 @@ exec "${nodePath}" "${scriptPath}" "$@"
 
 	private isFolderDisconnected(path: string): boolean {
 		return Object.keys(this.settings.disconnectedFolders || {}).some((folder) => this.isPathWithin(path, folder));
+	}
+
+	/** Listed in a .feishuignore: skipped by folder sync, auto-sync, and the pre-push hook. Call refreshIgnoreRules first. */
+	private isSyncIgnored(path: string): boolean {
+		return (this.ignoreRules ??= new IgnoreRules()).isIgnored(path);
+	}
+
+	/** Re-read every rule file that can apply to these paths. A rule file that cannot be read stops the sync rather than being skipped. */
+	private async refreshIgnoreRules(paths: string[]): Promise<void> {
+		const rules = this.ignoreRules ??= new IgnoreRules();
+		for (const dir of collectIgnoreDirectories(paths)) rules.setFile(dir, await this.readIgnoreFile(dir));
+	}
+
+	private async readIgnoreFile(dir: string): Promise<string | null> {
+		const path = ignoreFilePath(dir);
+		const adapter = this.app?.vault?.adapter;
+		if (!adapter || !await adapter.exists(path)) return null;
+		return await adapter.read(path);
+	}
+
+	/** Paths this plugin published from a folder, including files that no longer exist locally. */
+	private publishedPathsWithin(folderPath: string): string[] {
+		return [`${folderPath}/`, ...Object.keys(this.settings.documentBindings || {}), ...Object.keys(this.settings.pdfBindings || {})]
+			.filter((path) => this.isPathWithin(path, folderPath));
+	}
+
+	private hasIgnoredContent(folderPath: string): boolean {
+		return this.app.vault.getFiles().some((file) => this.isPathWithin(file.path, folderPath)
+			&& this.isSyncIgnored(file.path) && !this.isFolderDisconnected(file.path)
+			&& (file.extension.toLowerCase() === "md" || file.extension.toLowerCase() === "pdf"));
+	}
+
+	async openSyncIgnore(folderPath = ""): Promise<void> {
+		const { workspace } = this.app;
+		const leaf = workspace.getLeavesOfType(SYNC_IGNORE_VIEW_TYPE)[0] ?? workspace.getLeaf("tab");
+		await leaf.setViewState({ type: SYNC_IGNORE_VIEW_TYPE, active: true, state: { folder: folderPath } });
+		await workspace.revealLeaf(leaf);
+	}
+
+	private syncIgnoreHost(): SyncIgnoreHost {
+		return {
+			getLanguage: () => this.settings.language,
+			getVaultRoot: (): VaultNodeLike => this.app.vault.getRoot(),
+			getPublishedFolders: () => Object.keys(this.settings.publishedFolders || {}),
+			readIgnoreFiles: async (dirs) => {
+				const found = new Map<string, string>();
+				for (const dir of dirs) {
+					const content = await this.readIgnoreFile(dir);
+					if (content !== null) found.set(dir, content);
+				}
+				return found;
+			},
+			writeIgnoreFile: (dir, content) => this.app.vault.adapter.write(ignoreFilePath(dir), content)
+		};
 	}
 
 	private getRemoteFolderBinding(binding: PublishedFolderBinding, path: string): BoundLarkDocument | undefined {
@@ -5348,18 +5474,29 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			recoverBindings: (scope) => (this.operationQueue ??= new SyncQueue()).run(() => this.recoverPublishedBindings(scope)),
 			saveBindingUrl: (entry, url) => (this.operationQueue ??= new SyncQueue()).run(() => this.savePublishedBinding(entry, url)),
 			removeBinding: (entry) => (this.operationQueue ??= new SyncQueue()).run(() => this.disconnectPublishedBinding(entry)),
+			openSyncIgnore: (folderPath) => { void this.openSyncIgnore(folderPath); },
 			openLocalFile: async (entry) => {
 				const file = this.app.vault.getAbstractFileByPath(entry.path);
 				if (!(file instanceof TFile)) throw new Error(`Local file not found: ${entry.path}`);
 				await this.app.workspace.getLeaf(false).openFile(file);
 			},
-			sync: async (entry) => {
-				if (entry.kind === "folder") { await this.publishFolderInternal(entry.path); return; }
+			sync: async (entry, report) => {
+				// The top-right notice keeps showing progress after the window is closed; the window shows the same lines.
+				if (entry.kind === "folder") {
+					const base = this.t("noticePublishingFolderToLark");
+					await this.runWithProgressNotice(base, (notice) => this.publishFolderInternal(entry.path, false, (message) => {
+						notice.setMessage(`${base}\n${message}`);
+						report?.(message);
+					}));
+					return;
+				}
 				const file = this.app.vault.getAbstractFileByPath(entry.path);
 				if (!(file instanceof TFile)) throw new Error(`Local file not found: ${entry.path}`);
-				if (entry.kind === "pdf") { await this.syncPdfFile(file); return; }
-				await this.syncFileInternal(file, { allowCreate: false, openAfterSync: false,
-					showSuccess: false, showRemoteDeletedNotice: false, updateFrontmatter: this.settings.updateFrontmatter, mode: "manual" });
+				await this.runWithProgressNotice(this.t("noticeSyncingToLark"), async () => {
+					if (entry.kind === "pdf") { await this.syncPdfFile(file); return; }
+					await this.syncFileInternal(file, { allowCreate: false, openAfterSync: false,
+						showSuccess: false, showRemoteDeletedNotice: false, updateFrontmatter: this.settings.updateFrontmatter, mode: "manual" });
+				});
 			}
 		};
 	}
@@ -5862,6 +5999,17 @@ class LarkCliSyncSettingTab extends PluginSettingTab {
 							min: 1,
 							step: 1,
 							defaultValue: DEFAULT_AUTO_SYNC_DELAY_SECONDS
+						}
+					},
+					{
+						name: t("settingSyncIgnoreName"),
+						desc: t("settingSyncIgnoreDesc"),
+						render: (setting) => {
+							setting.addButton((button) => {
+								button.setButtonText(t("openSyncIgnoreButton")).onClick(() => {
+									void this.plugin.openSyncIgnore();
+								});
+							});
 						}
 					},
 					{

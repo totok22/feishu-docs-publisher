@@ -22,11 +22,14 @@ export interface PublishedLinksHost {
 	/** Remove only plugin settings binding metadata. Never edit notes or delete a remote document. */
 	removeBinding(entry: PublishedLinkEntry): MaybePromise<void>;
 	openLocalFile?(entry: PublishedLinkEntry): MaybePromise<void>;
-	sync?(entry: PublishedLinkEntry): MaybePromise<void>;
+	/** `report` receives short progress lines (for example the current step) while a long sync runs. */
+	sync?(entry: PublishedLinkEntry, report?: (message: string) => void): MaybePromise<void>;
 	openUrl?(url: string): MaybePromise<void>;
 	copyUrl?(url: string): MaybePromise<void>;
 	/** Read existing remote children and save unique matches in local settings; never create remote content. */
 	recoverBindings?(folderPath: string): MaybePromise<string>;
+	/** Open the page where files and folders are chosen to be left out of sync, scoped to a folder when given. */
+	openSyncIgnore?(folderPath: string): void;
 }
 
 const MESSAGES = {
@@ -37,16 +40,19 @@ const MESSAGES = {
 		all: "All folders", refresh: "Refresh", loading: "Loading…",
 		recover: "Find existing links", recovering: "Finding existing links…",
 		recoveryHint: "Find matching filenames in Feishu. If several files match, set the link manually.",
+		ignoreRules: "Sync ignore", ignoreRulesHint: "Choose files and folders to leave out of sync",
 		empty: "No published files yet.", noMatches: "No matching files.",
 		count: (visible: number, total: number) => visible === total ? `${total} items` : `${visible} of ${total} items`,
 		markdown: "Note", pdf: "PDF", folder: "Folder", open: "Open in Feishu", copy: "Copy link", more: "More",
 		copied: "Link copied.", edit: "Set link", local: "Open local file", sync: "Sync",
-		synced: "Sync completed.", disconnect: "Remove saved link", cancel: "Cancel", save: "Save",
+		synced: (name: string) => `Synced "${name}".`, disconnect: "Remove saved link", cancel: "Cancel", save: "Save",
 		editTitle: "Set Feishu link", url: "Feishu/Lark link",
 		urlHint: "Paste the link to this file or folder.",
 		editHelp: "Future syncs will update the file at this link.",
 		folderEditHelp: "Future folder syncs will upload here.",
 		saving: "Saving…", removing: "Removing…", working: "Working…",
+		syncing: (name: string) => `Syncing "${name}" to Feishu…`,
+		syncingFolder: (name: string) => `Syncing folder "${name}" to Feishu… This can take a few minutes for many files. Closing this window does not stop it; progress also shows in the notification at the top right.`,
 		noUrl: "Link not set", invalidUrl: "The link must use HTTP or HTTPS.",
 		failed: "Action failed. Please try again.", previous: "Previous", next: "Next",
 		page: (page: number, pages: number) => `Page ${page} of ${pages}`
@@ -58,16 +64,19 @@ const MESSAGES = {
 		all: "所有文件夹", refresh: "刷新", loading: "正在加载…",
 		recover: "查找已有链接", recovering: "正在查找已有链接…",
 		recoveryHint: "在飞书中查找同名文件。如有多个同名文件，请手动设置链接。",
+		ignoreRules: "同步忽略", ignoreRulesHint: "选择同步时要忽略的文件和文件夹",
 		empty: "还没有已发布文件。", noMatches: "没有找到匹配的文件。",
 		count: (visible: number, total: number) => visible === total ? `共 ${total} 项` : `${visible} / ${total} 项`,
 		markdown: "笔记", pdf: "PDF", folder: "文件夹", open: "在飞书打开", copy: "复制链接", more: "更多",
 		copied: "已复制链接。", edit: "设置链接", local: "打开本地文件", sync: "同步",
-		synced: "同步完成。", disconnect: "移除链接记录", cancel: "取消", save: "保存",
+		synced: (name: string) => `已同步「${name}」。`, disconnect: "移除链接记录", cancel: "取消", save: "保存",
 		editTitle: "设置飞书链接", url: "飞书链接",
 		urlHint: "粘贴此文件或文件夹的飞书链接。",
 		editHelp: "后续同步会更新此链接对应的文件。",
 		folderEditHelp: "后续目录同步会上传到这里。",
 		saving: "正在保存…", removing: "正在移除…", working: "正在处理…",
+		syncing: (name: string) => `正在把「${name}」同步到飞书…`,
+		syncingFolder: (name: string) => `正在把文件夹「${name}」同步到飞书…文件较多时可能需要几分钟。关闭这个窗口不会中断同步，进度也会显示在右上角的通知里。`,
 		noUrl: "未设置链接", invalidUrl: "链接必须以 HTTP 或 HTTPS 开头。",
 		failed: "操作失败，请重试。", previous: "上一页", next: "下一页",
 		page: (page: number, pages: number) => `第 ${page} / ${pages} 页`
@@ -123,9 +132,11 @@ function createFeedback(container: HTMLElement): HTMLParagraphElement {
 	return feedback;
 }
 
-function showFeedback(element: HTMLElement, text: string, error = false): void {
+/** A status line: plain, "busy" (with a spinner while work is under way), or an error. */
+function showFeedback(element: HTMLElement, text: string, state: boolean | "busy" = false): void {
 	element.setText(text);
-	element.toggleClass("is-error", error);
+	element.toggleClass("is-error", state === true);
+	element.toggleClass("is-busy", state === "busy");
 }
 
 export class PublishedLinksModal extends Modal {
@@ -173,9 +184,19 @@ export class PublishedLinksModal extends Modal {
 			});
 			search.inputEl.setAttribute("aria-label", t.searchHint);
 		});
+		if (this.host.openSyncIgnore) {
+			toolbar.addButton((button) => {
+				button.setButtonText(t.ignoreRules).setTooltip(t.ignoreRulesHint).onClick(() => {
+					const folder = normalizePath(this.folderPath);
+					this.close();
+					this.host.openSyncIgnore?.(folder);
+				});
+				button.buttonEl.setAttribute("aria-label", t.ignoreRulesHint);
+			});
+		}
 		toolbar.settingEl.addClass("feishu-lark-published-toolbar");
 		this.feedbackEl = createFeedback(this.contentEl);
-		this.countEl = createFeedback(this.contentEl);
+		this.countEl = this.contentEl.createDiv({ cls: "feishu-lark-published-count" });
 		this.listEl = this.contentEl.createDiv({ cls: "feishu-lark-published-list" });
 		void this.refresh();
 	}
@@ -192,7 +213,7 @@ export class PublishedLinksModal extends Modal {
 		const t = messages(this.host);
 		this.refreshButton.setDisabled(true);
 		this.recoveryButton?.setDisabled(true);
-		showFeedback(this.feedbackEl, t.loading);
+		showFeedback(this.feedbackEl, t.loading, "busy");
 		try {
 			const entries = await this.host.listEntries();
 			if (!this.active || requestId !== this.requestId) return;
@@ -218,7 +239,7 @@ export class PublishedLinksModal extends Modal {
 		this.recoveryButton?.setDisabled(true);
 		this.refreshButton.setDisabled(true);
 		const t = messages(this.host);
-		showFeedback(this.feedbackEl, t.recovering);
+		showFeedback(this.feedbackEl, t.recovering, "busy");
 		try {
 			const summary = await this.host.recoverBindings(normalizePath(this.folderPath));
 			if (this.active) await this.refresh(summary);
@@ -268,10 +289,12 @@ export class PublishedLinksModal extends Modal {
 		const setting = new Setting(this.listEl).setName(entry.name || entry.path.split("/").pop() || "/")
 			.setDesc(`${t[entry.kind]} · ${entry.path || "/"}${entry.url ? "" : ` · ${t.noUrl}`}`);
 		setting.settingEl.addClass("feishu-lark-published-entry");
-		const actions: { label: string; icon: string; action: () => MaybePromise<void>; disabled: boolean }[] = [];
-		const addAction = (label: string, icon: string, action: () => MaybePromise<void>, disabled = false): void => {
-			actions.push({ label, icon, action, disabled });
+		const actions: { label: string; icon: string; action: (report: (message: string) => void) => MaybePromise<void>; disabled: boolean; busy: string }[] = [];
+		const addAction = (label: string, icon: string, action: (report: (message: string) => void) => MaybePromise<void>,
+			disabled = false, busy = t.working): void => {
+			actions.push({ label, icon, action, disabled, busy });
 		};
+		const displayName = entry.name || entry.path.split("/").pop() || "/";
 		addAction(t.open, "external-link", async () => {
 			const url = new URL(entry.url);
 			if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error(t.invalidUrl);
@@ -291,11 +314,11 @@ export class PublishedLinksModal extends Modal {
 			new PublishedLinkBindingModal(this.app, this.host, entry, () => this.refresh()).open();
 		});
 		if (this.host.openLocalFile && entry.kind !== "folder") addAction(t.local, "file", () => this.host.openLocalFile!(entry));
-		if (this.host.sync) addAction(t.sync, "refresh-cw", async () => {
-			await this.host.sync!(entry);
+		if (this.host.sync) addAction(t.sync, "refresh-cw", async (report) => {
+			await this.host.sync!(entry, report);
 			await this.refresh();
-			if (this.active) showFeedback(this.feedbackEl, t.synced);
-		});
+			if (this.active) showFeedback(this.feedbackEl, t.synced(displayName));
+		}, false, entry.kind === "folder" ? t.syncingFolder(displayName) : t.syncing(displayName));
 		addAction(t.disconnect, "unlink", () => {
 			new DisconnectPublishedLinkModal(this.app, this.host, entry, () => this.refresh()).open();
 		});
@@ -303,7 +326,7 @@ export class PublishedLinksModal extends Modal {
 		setting.addButton((button) => {
 			controls.push({ button, disabled: open.disabled });
 			button.setButtonText(open.label).setDisabled(open.disabled || this.pending.has(entry.id))
-				.onClick(() => { void this.runAction(entry, open.action, controls); });
+				.onClick(() => { void this.runAction(entry, open.action, controls, open.busy); });
 		});
 		setting.addButton((button) => {
 			controls.push({ button, disabled: false });
@@ -313,7 +336,7 @@ export class PublishedLinksModal extends Modal {
 				for (const item of actions.slice(1)) {
 					if (item.label === t.disconnect) menu.addSeparator();
 					menu.addItem((menuItem) => menuItem.setTitle(item.label).setIcon(item.icon).setDisabled(item.disabled)
-						.onClick(() => { if (this.active) void this.runAction(entry, item.action, controls); }));
+						.onClick(() => { if (this.active) void this.runAction(entry, item.action, controls, item.busy); }));
 				}
 				menu.showAtMouseEvent(event);
 			});
@@ -322,16 +345,20 @@ export class PublishedLinksModal extends Modal {
 		});
 	}
 
-	private async runAction(entry: PublishedLinkEntry, action: () => MaybePromise<void>,
-		controls: { button: ButtonComponent; disabled: boolean }[]): Promise<void> {
+	private async runAction(entry: PublishedLinkEntry, action: (report: (message: string) => void) => MaybePromise<void>,
+		controls: { button: ButtonComponent; disabled: boolean }[], busy: string): Promise<void> {
 		if (this.pending.has(entry.id)) return;
 		const renderRevision = this.renderRevision;
 		this.pending.add(entry.id);
-		showFeedback(this.feedbackEl, messages(this.host).working);
+		showFeedback(this.feedbackEl, busy, "busy");
 		controls.forEach(({ button }) => { button.setDisabled(true); });
+		// The current step goes under the main line, so the page never looks stuck during a long sync.
+		const report = (message: string): void => {
+			if (this.active && this.pending.has(entry.id)) showFeedback(this.feedbackEl, `${busy}\n${message}`, "busy");
+		};
 		try {
-			await action();
-			if (this.active && this.feedbackEl.textContent === messages(this.host).working) showFeedback(this.feedbackEl, "");
+			await action(report);
+			if (this.active && this.feedbackEl.textContent === busy) showFeedback(this.feedbackEl, "");
 		} catch (error) {
 			if (this.active) showFeedback(this.feedbackEl, errorMessage(error, messages(this.host).failed), true);
 		} finally {

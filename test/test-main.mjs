@@ -21,6 +21,8 @@ await esbuild.build({
 			build.onLoad({ filter: /.*/, namespace: "obsidian-test-stub" }, () => ({
 				contents: `
 					export const addIcon = () => {};
+					export const setIcon = () => {};
+					export class ItemView {}
 					export class App {}
 					export class FileSystemAdapter {}
 					export class Menu {}
@@ -32,7 +34,8 @@ await esbuild.build({
 						constructor(message, timeout) {
 							globalThis.__obsidianNotices?.push({ message, timeout });
 						}
-						hide() {}
+						setMessage(message) { globalThis.__obsidianNoticeUpdates?.push(message); return this; }
+						hide() { globalThis.__obsidianNoticeHidden?.push(true); }
 					}
 					export class Plugin {}
 					export class PluginSettingTab {}
@@ -1466,6 +1469,170 @@ for (const [syncOk, expected] of [[true, 1], [false, 0]]) {
 	delete globalThis.__obsidianNotices;
 }
 
+// Sync ignore: what a .feishuignore lists is skipped by folder sync, auto-sync and remote cleanup.
+const ignoredNote = { ...fakeNote, path: "Root/Kept.md" };
+const privateNote = { ...fakeNote, path: "Root/Private/Secret.md" };
+const draftNote = { ...fakeNote, path: "Root/draft.md" };
+const privatePdf = { path: "Root/Private/Scan.pdf", extension: "pdf" };
+const useIgnoreFiles = (plugin, files) => {
+	plugin.app.vault.adapter = { exists: async (path) => Object.hasOwn(files, path), read: async (path) => files[path] };
+};
+const ignorePlugin = createPublishingPlugin();
+useIgnoreFiles(ignorePlugin, { "Root/.feishuignore": "Private/\n/draft.md\n" });
+await ignorePlugin.refreshIgnoreRules(["Root/Private/a.md", "Root/Privates/a.md", "Root/draft.md", "Other/draft.md"]);
+assert.equal(ignorePlugin.isSyncIgnored("Root/Private/a.md"), true);
+assert.equal(ignorePlugin.isSyncIgnored("Root/Privates/a.md"), false);
+assert.equal(ignorePlugin.isSyncIgnored("Root/draft.md"), true);
+assert.equal(ignorePlugin.isSyncIgnored("Other/draft.md"), false, "a rule file only reaches its own folder");
+assert.equal(createPlugin().isSyncIgnored("Root/draft.md"), false, "no rule file, nothing ignored");
+
+// A rule file is looked up in the file's folder and every folder above it, including the vault root.
+const stackedPlugin = createPublishingPlugin();
+useIgnoreFiles(stackedPlugin, { ".feishuignore": "*.tmp.md\n", "Root/Deep/.feishuignore": "!keep.tmp.md\n/skip.md\n" });
+await stackedPlugin.refreshIgnoreRules(["Root/Deep/keep.tmp.md", "Root/Deep/skip.md", "Root/Deep/x.tmp.md", "Root/a.tmp.md"]);
+assert.deepEqual(["Root/Deep/keep.tmp.md", "Root/Deep/skip.md", "Root/Deep/x.tmp.md", "Root/a.tmp.md"].map((path) => stackedPlugin.isSyncIgnored(path)),
+	[false, true, true, true]);
+// Deleting the rule file takes effect on the next refresh.
+useIgnoreFiles(stackedPlugin, {});
+await stackedPlugin.refreshIgnoreRules(["Root/a.tmp.md"]);
+assert.equal(stackedPlugin.isSyncIgnored("Root/a.tmp.md"), false);
+
+// A rule file that cannot be read stops the operation instead of syncing everything.
+const unreadablePlugin = createPublishingPlugin();
+unreadablePlugin.app.vault.adapter = { exists: async () => true, read: async () => { throw new Error("EACCES"); } };
+await assert.rejects(unreadablePlugin.refreshIgnoreRules(["Root/a.md"]), /EACCES/);
+
+const readPaths = [];
+ignorePlugin.app.vault.getMarkdownFiles = () => [ignoredNote, privateNote, draftNote];
+ignorePlugin.app.vault.getFiles = () => [ignoredNote, privateNote, draftNote, privatePdf];
+ignorePlugin.withDeferredLarkSyncStateSave = async (callback) => callback();
+ignorePlugin.readNoteForLark = async (file) => { readPaths.push(file.path); throw new Error("stop after read"); };
+const folderProgress = [];
+await assert.rejects(ignorePlugin.publishFolderInternal("Root", false, (message) => folderProgress.push(message)), /stop after read/);
+assert.deepEqual(readPaths, ["Root/Kept.md"], "folder sync reads only notes that are not ignored");
+assert.deepEqual(folderProgress, ["正在检查文件夹里的笔记、PDF 和图片…", "共 1 个文件待同步，3 个被 .feishuignore 忽略。", "正在读取 1 篇笔记，并检查飞书上的目录…"],
+	"progress says what will be synced and how many files the rules left out");
+
+const allIgnoredPlugin = createPublishingPlugin();
+useIgnoreFiles(allIgnoredPlugin, { ".feishuignore": "/Root/\n" });
+allIgnoredPlugin.app.vault.getMarkdownFiles = () => [ignoredNote];
+allIgnoredPlugin.app.vault.getFiles = () => [ignoredNote];
+allIgnoredPlugin.withDeferredLarkSyncStateSave = async (callback) => callback();
+allIgnoredPlugin.readNoteForLark = async () => { throw new Error("an ignored note must not be read"); };
+globalThis.__obsidianNotices = [];
+await allIgnoredPlugin.publishFolderInternal("Root");
+assert.match(globalThis.__obsidianNotices[0].message, /忽略/, "an all-ignored folder explains why nothing was synced");
+const emptyFolderPlugin = createPublishingPlugin();
+emptyFolderPlugin.app.vault.getFiles = () => [];
+emptyFolderPlugin.withDeferredLarkSyncStateSave = async (callback) => callback();
+globalThis.__obsidianNotices = [];
+await emptyFolderPlugin.publishFolderInternal("Root");
+assert.doesNotMatch(globalThis.__obsidianNotices[0].message, /忽略/, "a folder with no files keeps the original notice");
+globalThis.__obsidianNotices = undefined;
+
+const originalWindow = globalThis.window;
+globalThis.window = { setTimeout: (_callback, delay) => delay, clearTimeout: () => {} };
+try {
+	const createAutoPlugin = (files) => {
+		const plugin = createPublishingPlugin();
+		plugin.autoSyncTimers = new Map();
+		plugin.autoSyncRunningPaths = new Set();
+		plugin.autoSyncPendingPaths = new Set();
+		plugin.settings.autoSyncDelaySeconds = 5;
+		plugin.settings.documentBindings = { "Root/Kept.md": canonicalBinding, "Root/draft.md": canonicalBinding };
+		useIgnoreFiles(plugin, files);
+		return plugin;
+	};
+	const autoPlugin = createAutoPlugin({ "Root/.feishuignore": "/draft.md\n" });
+	const synced = [];
+	autoPlugin.syncFileInternal = async (file) => { synced.push(file.path); };
+	await autoPlugin.runSaveAutoSync(draftNote);
+	assert.deepEqual(synced, [], "saving an ignored note does not sync it");
+	await autoPlugin.runSaveAutoSync(ignoredNote);
+	assert.deepEqual(synced, ["Root/Kept.md"], "other notes still auto-sync");
+
+	// Ignoring happens when the timer fires, so a rule added after the save but before the sync still holds.
+	const lateRules = { "Root/.feishuignore": "" };
+	const latePlugin = createAutoPlugin(lateRules);
+	latePlugin.syncFileInternal = async () => { throw new Error("an ignored note must not auto-sync"); };
+	latePlugin.queueSaveAutoSync(draftNote);
+	assert.deepEqual([...latePlugin.autoSyncTimers.keys()], ["Root/draft.md"]);
+	lateRules["Root/.feishuignore"] = "/draft.md\n";
+	await latePlugin.runSaveAutoSync(draftNote);
+
+	// An unreadable rule file is reported and nothing is synced.
+	const brokenPlugin = createAutoPlugin({});
+	brokenPlugin.app.vault.adapter = { exists: async () => true, read: async () => { throw new Error("EACCES"); } };
+	brokenPlugin.syncFileInternal = async () => { throw new Error("must not sync without knowing the rules"); };
+	globalThis.__obsidianNotices = [];
+	await brokenPlugin.runSaveAutoSync(ignoredNote);
+	assert.match(globalThis.__obsidianNotices[0].message, /EACCES/);
+	globalThis.__obsidianNotices = undefined;
+} finally {
+	globalThis.window = originalWindow;
+}
+
+const cleanupPlugin = createPublishingPlugin();
+cleanupPlugin.settings.documentBindings = {
+	"Root/Gone.md": { token: "gone", url: "https://example.feishu.cn/docx/gone" },
+	"Root/Private/Gone.md": { token: "private-gone", url: "https://example.feishu.cn/docx/private-gone" }
+};
+useIgnoreFiles(cleanupPlugin, { "Root/.feishuignore": "Private/\n" });
+await cleanupPlugin.refreshIgnoreRules(cleanupPlugin.publishedPathsWithin("Root"));
+assert.deepEqual(cleanupPlugin.findMissingRemoteFiles("Root").map((file) => file.path), ["Root/Gone.md"],
+	"remote files under an ignored path are never offered for deletion");
+
+// The ignore page reads and writes the same files.
+const hostWrites = [];
+const hostPlugin = createPublishingPlugin();
+hostPlugin.app.vault.adapter = {
+	exists: async (path) => path === "Root/.feishuignore",
+	read: async () => "/a.md\n",
+	write: async (path, content) => { hostWrites.push({ path, content }); }
+};
+const ignoreHost = hostPlugin.syncIgnoreHost();
+assert.deepEqual([...(await ignoreHost.readIgnoreFiles(["", "Root", "Root/Sub"])).entries()], [["Root", "/a.md\n"]]);
+await ignoreHost.writeIgnoreFile("Root/Sub", "/b.md\n");
+await ignoreHost.writeIgnoreFile("", "/c.md\n");
+assert.deepEqual(hostWrites, [{ path: "Root/Sub/.feishuignore", content: "/b.md\n" }, { path: ".feishuignore", content: "/c.md\n" }]);
+
+
+// Long operations keep a notice at the top right, report their steps there and in the window, and still surface failures.
+const longOpPlugin = createPlugin();
+globalThis.__obsidianNotices = [];
+globalThis.__obsidianNoticeHidden = [];
+assert.equal(await longOpPlugin.runWithProgressNotice("working", async () => "done"), "done");
+await assert.rejects(longOpPlugin.runWithProgressNotice("working", async () => { throw new Error("boom"); }), /boom/);
+assert.deepEqual(globalThis.__obsidianNotices.map((notice) => notice.timeout), [0, 0, 10000], "a persistent notice, then a lasting error notice");
+assert.match(globalThis.__obsidianNotices[2].message, /boom/);
+assert.equal(globalThis.__obsidianNoticeHidden.length, 2, "the progress notice is hidden on success and on failure");
+assert.equal(await longOpPlugin.runWithNotice("working", async () => {}), true);
+assert.equal(await longOpPlugin.runWithNotice("working", async () => { throw new Error("boom"); }), false);
+
+const syncHostPlugin = createPlugin();
+syncHostPlugin.publishFolderInternal = async (_folder, _overwrite, onProgress) => { onProgress("step A"); onProgress("step B"); };
+globalThis.__obsidianNotices = [];
+globalThis.__obsidianNoticeUpdates = [];
+globalThis.__obsidianNoticeHidden = [];
+const reportedSteps = [];
+await syncHostPlugin.publishedLinksHost().sync({ id: "folder:Root", kind: "folder", path: "Root", url: "" }, (message) => reportedSteps.push(message));
+assert.deepEqual(reportedSteps, ["step A", "step B"], "the window gets every step");
+assert.deepEqual(globalThis.__obsidianNoticeUpdates, ["正在发布目录到飞书...\nstep A", "正在发布目录到飞书...\nstep B"], "so does the notice");
+assert.deepEqual(globalThis.__obsidianNotices.map((notice) => notice.timeout), [0]);
+assert.equal(globalThis.__obsidianNoticeHidden.length, 1);
+
+// The right-click folder sync shows the same steps in its notice.
+const menuSyncPlugin = createPlugin();
+menuSyncPlugin.publishFolderInternal = async (_folder, _overwrite, onProgress) => { onProgress("step A"); };
+menuSyncPlugin.cleanupMissingRemoteFiles = async () => {};
+globalThis.__obsidianNoticeUpdates = [];
+await menuSyncPlugin.publishFolder("Root");
+await menuSyncPlugin.publishFolder("Root", true);
+assert.deepEqual(globalThis.__obsidianNoticeUpdates, ["正在发布目录到飞书...\nstep A", "正在覆盖同步到飞书...\nstep A"]);
+globalThis.__obsidianNotices = undefined;
+globalThis.__obsidianNoticeUpdates = undefined;
+globalThis.__obsidianNoticeHidden = undefined;
+
 const galleryRoot = await mkdtemp(join(tmpdir(), "image-gallery-main-"));
 try {
 	await mkdir(join(galleryRoot, "Root", "Shots"), { recursive: true });
@@ -1509,6 +1676,38 @@ try {
 	assert.deepEqual(writes, [{ kind: "modify", path: "Root/Shots/Shots 图片.md" }]);
 	assert.match(contents.get("Root/Shots/Shots 图片.md"), /^---\nlark_url: https:\/\/example\.feishu\.cn\/docx\/shots\n---\n\n<!-- feishu-docs-publisher:image-gallery -->/);
 	assert.match(contents.get("Root/Shots/Shots 图片.md"), /c\.png\]\]\n$/);
+
+	// Ignored images and folders are not collected; images embedded by an ignored note stay out too.
+	contents.clear();
+	contents.set("Root/Notes/Readme.md", "![[used.png]]\n");
+	contents.set("Root/Notes/Secret.md", "![[spare.png]]\n");
+	writes.length = 0;
+	const ignoredGalleryPlugin = createGalleryPlugin();
+	const galleryPaths = [...imagePaths, ...contents.keys()];
+	useIgnoreFiles(ignoredGalleryPlugin, { "Root/.feishuignore": "/Notes/Secret.md\nb.png\n" });
+	await ignoredGalleryPlugin.refreshIgnoreRules(galleryPaths);
+	assert.equal(await ignoredGalleryPlugin.ensureImageGalleryNotes("Root"), 1);
+	assert.deepEqual(writes, [{ kind: "create", path: "Root/Shots/Shots 图片.md" }]);
+	assert.doesNotMatch(contents.get("Root/Shots/Shots 图片.md"), /b\.png/);
+	assert.match(contents.get("Root/Shots/Shots 图片.md"), /a\.png.*c\.png/s);
+
+	contents.clear();
+	contents.set("Root/Notes/Readme.md", "![[used.png]]\n");
+	writes.length = 0;
+	useIgnoreFiles(ignoredGalleryPlugin, { "Root/.feishuignore": "/Shots/\n" });
+	await ignoredGalleryPlugin.refreshIgnoreRules(galleryPaths);
+	assert.equal(await ignoredGalleryPlugin.ensureImageGalleryNotes("Root"), 1);
+	assert.deepEqual(writes, [{ kind: "create", path: "Root/Notes/Notes 图片.md" }], "an ignored folder gets no gallery");
+
+	// An ignored gallery note is left exactly as it is, and still reserves its path.
+	const staleGallery = "<!-- feishu-docs-publisher:image-gallery -->\n\n![[Root/Shots/old.png]]\n";
+	contents.set("Root/Shots/Shots 图片.md", staleGallery);
+	writes.length = 0;
+	useIgnoreFiles(ignoredGalleryPlugin, { "Root/.feishuignore": "/Shots/Shots 图片.md\n" });
+	await ignoredGalleryPlugin.refreshIgnoreRules([...galleryPaths, "Root/Shots/Shots 图片.md"]);
+	await ignoredGalleryPlugin.ensureImageGalleryNotes("Root");
+	assert.equal(contents.get("Root/Shots/Shots 图片.md"), staleGallery);
+	assert.equal(writes.some((write) => write.path === "Root/Shots/Shots 图片.md"), false);
 
 	// A folder with nothing but images no longer stops at "no files": the gallery note is published.
 	contents.clear();

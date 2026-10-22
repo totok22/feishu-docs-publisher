@@ -170,6 +170,21 @@ Detailed design: 02-database.md
 
 Local notes remain unchanged.
 
+### Ignoring files and folders
+
+To keep some notes, PDFs, or subfolders of a synced folder out of Feishu/Lark, list them in a `.feishuignore` file inside that folder. It works like `.gitignore`: one pattern per line, `*` and `**` wildcards, a trailing `/` for folders, `!` to bring something back, `#` for comments. Patterns are relative to the folder the file sits in, and a file deeper in the tree overrides one higher up (a `.feishuignore` in the vault root applies everywhere). Because it is a plain file, you can edit it by hand, commit it to Git, or copy it to another folder or vault to reuse the rules.
+
+```gitignore
+# Projects/Alpha/.feishuignore
+/Drafts/
+*.draft.md
+!/Drafts/keep.md
+```
+
+You do not have to write it yourself. Open the `Sync ignore` page: right-click the folder and choose `Lark: Choose files to ignore`, or choose `Sync ignore` in the `Published files` window, the command palette, or the plugin settings and pick the folder there. The page shows only that folder as a tree. Uncheck a file or subfolder to ignore it; check it again to sync it. A folder with some items unchecked shows a partial mark, and unchecking a folder ignores everything inside it, including files added later. The page writes the matching lines to the folder's `.feishuignore`; use `Edit rules file` there to see or change the raw text, `Change folder` to switch folders, and `Clear rules` to empty the current folder's file.
+
+Ignored items are skipped by folder sync, auto-sync on save, and the Git pre-push hook. Content already in Feishu/Lark is kept, and images that only an ignored note embeds are not uploaded. Syncing a single note by hand with the command or the file menu still works. If a `.feishuignore` cannot be read, the sync stops instead of publishing without it. Obsidian does not show dotfiles in its file list, so use the page or an external editor to change the file.
+
 ### Published files
 
 Click the paper-plane ribbon icon, or use the command palette, to open `Published files`. Copying links and browsing saved records are available in this window.
