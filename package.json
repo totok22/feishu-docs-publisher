@@ -9,7 +9,7 @@
 		"dev": "node scripts/generate-embedded-helpers.mjs && node esbuild.config.mjs",
 		"check": "npm test && npm run build",
 		"release:check": "node scripts/check-release-notes.mjs",
-		"test": "node scripts/generate-embedded-helpers.mjs && tsc --noEmit && node test/test-link-rewrite.mjs && node test/test-pdf-links.mjs && node test/test-folder-path.mjs && node test/test-note-content.mjs && node test/test-lark-cli-command.mjs && node test/test-lark-cli-management.mjs && node test/test-lark-sync-core.mjs && node test/test-local-image.mjs && node test/test-image-gallery.mjs && node test/test-main.mjs && node test/test-published-links.mjs && node test/test-pdf-publish.mjs && node test/test-pre-push.mjs",
+		"test": "node scripts/generate-embedded-helpers.mjs && tsc --noEmit && node test/test-link-rewrite.mjs && node test/test-pdf-links.mjs && node test/test-folder-path.mjs && node test/test-note-content.mjs && node test/test-lark-cli-command.mjs && node test/test-lark-cli-management.mjs && node test/test-lark-sync-core.mjs && node test/test-local-image.mjs && node test/test-image-gallery.mjs && node test/test-remote-cleanup.mjs && node test/test-main.mjs && node test/test-published-links.mjs && node test/test-pdf-publish.mjs && node test/test-pre-push.mjs",
 		"version": "node scripts/version-bump.mjs && git add manifest.json versions.json"
 	},
 	"keywords": [

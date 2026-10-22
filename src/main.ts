@@ -140,6 +140,8 @@ import {
 	planImageGalleries,
 	replaceImageGalleryBody
 } from "./image-gallery";
+import { confirmDeletion } from "./confirm-delete-modal";
+import { findMissingRemoteFiles, MissingRemoteFile } from "./remote-cleanup";
 import { PublishedLinkBindingModal, PublishedLinkEntry, PublishedLinksHost, PublishedLinksModal } from "./published-links";
 import { createPdfBindingKey, PdfBinding, PdfPublishParent, publishPdf } from "./pdf-publish";
 import { buildPublishedPdfTargets, rewritePublishedPdfLinks } from "./pdf-links";
@@ -166,6 +168,7 @@ const DEFAULT_SETTINGS: LarkCliSyncSettings = {
 	autoSyncDelaySeconds: 15,
 	syncStrategy: "auto",
 	stateCacheRetainLimit: 100,
+	deleteMissingRemote: false,
 	proxyMode: "system",
 	proxyHost: DEFAULT_PROXY_HOST,
 	proxyPort: DEFAULT_PROXY_PORT,
@@ -243,6 +246,7 @@ interface LarkCliSyncSettings {
 	autoSyncDelaySeconds: number;
 	syncStrategy: SyncStrategy;
 	stateCacheRetainLimit: number;
+	deleteMissingRemote: boolean;
 	proxyMode: LarkCliProxyMode;
 	proxyHost: string;
 	proxyPort: number;
@@ -500,6 +504,14 @@ const MESSAGES = {
 		noticeOverwriteSyncingToLark: "正在覆盖同步到飞书...",
 		noticePublishingFolderToLark: "正在发布目录到飞书...",
 		noticeNoMarkdownFilesInFolder: "该目录下没有 Markdown、PDF 或图片文件。",
+		noticeDeletingMissingRemote: "正在删除本地已不存在的飞书文件...",
+		noticeDeletedMissingRemote: "已删除 {count} 个本地已不存在的飞书文件。",
+		noticeSkippedMissingRemote: "有 {count} 个飞书文档下还有子页面，已跳过未删除。",
+		noticeDeleteMissingRemoteFailed: "删除飞书文件失败：{message}",
+		confirmDeleteMissingRemoteTitle: "删除飞书上的旧文件",
+		confirmDeleteMissingRemoteBody: "以下 {count} 个文件在本地已不存在，确认后将从飞书删除：",
+		confirmDeleteMissingRemoteButton: "删除",
+		confirmDeleteMissingRemoteCancel: "取消",
 		noticeImageGalleryCreated: "已生成 {count} 篇图片汇总笔记，收录未被文档引用的图片。",
 		imageGalleryNoteName: "{name} 图片",
 		noticePublishedToLark: "已发布到飞书",
@@ -620,6 +632,8 @@ const MESSAGES = {
 		autoSyncModePrePush: "Git pre-push hook",
 		settingAutoSyncDelayName: "保存后同步延迟",
 		settingAutoSyncDelayDesc: "文件保存后等待多少秒再同步，用于合并连续编辑。",
+		settingDeleteMissingRemoteName: "删除本地已不存在的飞书文件",
+		settingDeleteMissingRemoteDesc: "同步目录后，把本插件发布过、但本地文件已不存在的飞书文档和 PDF 删除，删除前会列出清单让你确认。只处理有发布记录的文件，不会动你在飞书里手动创建的内容。",
 		settingStateCacheName: "同步状态缓存",
 		settingStateCacheDesc: "设置最多保留多少篇文档状态；超过保留数的 1.5 倍时自动裁剪旧状态。老文档下次同步会重新建立块映射。",
 		settingInstallPrePushHookName: "安装 Git pre-push hook",
@@ -648,6 +662,14 @@ const MESSAGES = {
 		noticeOverwriteSyncingToLark: "Overwriting to Lark...",
 		noticePublishingFolderToLark: "Publishing folder to Lark...",
 		noticeNoMarkdownFilesInFolder: "No Markdown, PDF, or image files found in this folder.",
+		noticeDeletingMissingRemote: "Deleting Feishu/Lark files that no longer exist locally...",
+		noticeDeletedMissingRemote: "Deleted {count} Feishu/Lark files that no longer exist locally.",
+		noticeSkippedMissingRemote: "Skipped {count} documents that still have child pages.",
+		noticeDeleteMissingRemoteFailed: "Failed to delete a Feishu/Lark file: {message}",
+		confirmDeleteMissingRemoteTitle: "Delete old Feishu/Lark files",
+		confirmDeleteMissingRemoteBody: "These {count} files no longer exist locally and will be deleted from Feishu/Lark if you confirm:",
+		confirmDeleteMissingRemoteButton: "Delete",
+		confirmDeleteMissingRemoteCancel: "Cancel",
 		noticeImageGalleryCreated: "Created {count} image gallery notes for images no document references.",
 		imageGalleryNoteName: "{name} images",
 		noticePublishedToLark: "Published to Feishu/Lark",
@@ -768,6 +790,8 @@ const MESSAGES = {
 		autoSyncModePrePush: "Git pre-push hook",
 		settingAutoSyncDelayName: "Save sync delay",
 		settingAutoSyncDelayDesc: "Seconds to wait after a save before syncing, used to merge continuous edits.",
+		settingDeleteMissingRemoteName: "Delete remote files missing locally",
+		settingDeleteMissingRemoteDesc: "After a folder sync, delete Feishu/Lark documents and PDFs this plugin published whose local file no longer exists. You confirm a list first. Only files with a publish record are touched; content you created by hand in Feishu/Lark is never deleted.",
 		settingStateCacheName: "Sync state cache",
 		settingStateCacheDesc: "Maximum document states to keep. Old states are trimmed after the cache exceeds 1.5x this value. Old documents rebuild block mapping on next sync.",
 		settingInstallPrePushHookName: "Install Git pre-push hook",
@@ -2210,8 +2234,125 @@ exec "${nodePath}" "${scriptPath}" "$@"
 	}
 
 	private async publishFolder(folderPath: string, overwrite = false): Promise<void> {
-		await this.runWithNotice(this.t(overwrite ? "noticeOverwriteSyncingToLark" : "noticePublishingFolderToLark"),
+		const synced = await this.runWithNotice(this.t(overwrite ? "noticeOverwriteSyncingToLark" : "noticePublishingFolderToLark"),
 			() => this.publishFolderInternal(folderPath, overwrite));
+		if (synced) await this.cleanupMissingRemoteFiles(folderPath);
+	}
+
+	/** Offer to delete remote files this plugin published whose local file is gone. */
+	private async cleanupMissingRemoteFiles(folderPath: string): Promise<void> {
+		if (!this.settings.deleteMissingRemote) return;
+		const missing = this.findMissingRemoteFiles(folderPath);
+		if (missing.length === 0 || !await this.confirmDeleteMissingRemote(missing)) return;
+		await this.runWithNotice(this.t("noticeDeletingMissingRemote"), () =>
+			(this.operationQueue ??= new SyncQueue()).run(() => this.deleteMissingRemoteFiles(folderPath, missing)));
+	}
+
+	private confirmDeleteMissingRemote(missing: MissingRemoteFile[]): Promise<boolean> {
+		return confirmDeletion(this.app, {
+			title: this.t("confirmDeleteMissingRemoteTitle"),
+			body: this.t("confirmDeleteMissingRemoteBody", { count: String(missing.length) }),
+			confirm: this.t("confirmDeleteMissingRemoteButton"),
+			cancel: this.t("confirmDeleteMissingRemoteCancel")
+		}, missing.map((file) => file.path));
+	}
+
+	private findMissingRemoteFiles(folderPath: string): MissingRemoteFile[] {
+		// Whatever an existing local file or folder page still points at must survive.
+		const liveAliases = new Set<string>();
+		const keep = (binding: BoundLarkDocument): void => {
+			for (const alias of this.getBindingAliases(binding)) if (alias) liveAliases.add(alias);
+		};
+		for (const file of this.app.vault.getMarkdownFiles()) {
+			const binding = this.getBinding(file);
+			if (binding) keep(binding);
+		}
+		for (const [path, binding] of Object.entries(this.settings.pdfBindings || {})) {
+			if (binding.fileToken && this.app.vault.getAbstractFileByPath(path)) {
+				keep({ token: binding.fileToken, nodeToken: binding.nodeToken, url: binding.url || "" });
+			}
+		}
+		for (const binding of Object.values(this.settings.folderBindings || {})) keep(binding);
+		return findMissingRemoteFiles({
+			folderPath,
+			documentBindings: this.settings.documentBindings || {},
+			pdfBindings: this.settings.pdfBindings || {},
+			localFileExists: (path) => !!this.app.vault.getAbstractFileByPath(path),
+			isDisconnected: (path) => this.isFolderDisconnected(path) || !!this.settings.disconnectedBindings?.[path],
+			liveAliases,
+			aliasesOf: (binding) => this.getBindingAliases({ ...binding })
+		});
+	}
+
+	private async deleteMissingRemoteFiles(folderPath: string, planned: MissingRemoteFile[]): Promise<void> {
+		// Recompute inside the queue: a file may have reappeared since the user confirmed.
+		const confirmed = new Set(planned.map((file) => file.token));
+		let deleted = 0, skipped = 0;
+		const failures: string[] = [];
+		for (const target of this.findMissingRemoteFiles(folderPath).filter((file) => confirmed.has(file.token))) {
+			try {
+				if (await this.deleteRemoteFile(target) === "has-children") {
+					skipped += 1;
+					continue;
+				}
+				this.forgetMissingRemoteFile(target);
+				deleted += 1;
+			} catch (error) {
+				failures.push(`${target.path}: ${error instanceof Error ? error.message : String(error)}`);
+			}
+		}
+		if (deleted) {
+			await this.saveSettingsWithoutClearingCommandCache();
+			await this.saveLarkSyncState();
+			new Notice(this.t("noticeDeletedMissingRemote", { count: String(deleted) }), 8000);
+		}
+		if (skipped) new Notice(this.t("noticeSkippedMissingRemote", { count: String(skipped) }), 10000);
+		if (failures.length) new Notice(this.t("noticeDeleteMissingRemoteFailed", { message: failures.join("\n") }), 10000);
+	}
+
+	private async deleteRemoteFile(target: MissingRemoteFile): Promise<"deleted" | "has-children"> {
+		const objType = target.kind === "pdf" ? "file" : "docx";
+		try {
+			if (target.location === "drive") {
+				await this.runLarkCli(["drive", "+delete", "--as", "user", "--file-token", target.token,
+					"--type", objType, "--yes", "--json"]);
+				return "deleted";
+			}
+			return await this.deleteWikiLeaf(target, objType);
+		} catch (error) {
+			// Already deleted by hand: only the stale local record is left to clear.
+			const message = error instanceof Error ? error.message : String(error);
+			if (message.includes("1061007") || message.toLowerCase().includes("has been delete")) return "deleted";
+			throw error;
+		}
+	}
+
+	private async deleteWikiLeaf(target: MissingRemoteFile, objType: "docx" | "file"): Promise<"deleted" | "has-children"> {
+		if (!target.nodeToken) throw new LocalizedSyncError(this.settings.language === "en"
+			? "Cannot resolve the wiki node; deletion stopped." : "无法确定知识库节点，已停止删除。");
+		const info = await this.runLarkCli(["wiki", "+node-get", "--as", "user", "--node-token", target.nodeToken, "--json"]);
+		const node: LarkCommandNode | undefined = info.data?.node || info.data;
+		if (!node?.node_token || node.obj_token !== target.token || node.obj_type !== objType) {
+			throw new LocalizedSyncError(this.settings.language === "en"
+				? "The remote file moved or changed; deletion stopped." : "远端文件的位置或类型已变化，已停止删除。");
+		}
+		// Never cascade into child pages that belong to other notes.
+		if ((await this.listRemoteWikiNodes({ kind: "wiki", token: node.node_token, spaceId: node.space_id })).length) {
+			return "has-children";
+		}
+		await this.runLarkCli(["wiki", "+node-delete", "--as", "user", "--node-token", node.node_token,
+			"--obj-type", "wiki", "--include-children=false", "--yes", "--json"]);
+		return "deleted";
+	}
+
+	private forgetMissingRemoteFile(target: MissingRemoteFile): void {
+		if (target.kind === "pdf") {
+			delete this.settings.pdfBindings[target.path];
+			return;
+		}
+		const binding = this.settings.documentBindings[target.path];
+		delete this.settings.documentBindings[target.path];
+		if (binding) this.removeSyncStateForBinding(binding);
 	}
 
 	private async publishFolderInternal(folderPath: string, overwrite = false): Promise<void> {
@@ -5102,11 +5243,12 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		await this.saveLarkSyncState();
 	}
 
-	private async runWithNotice(message: string, callback: () => Promise<void>): Promise<void> {
+	private async runWithNotice(message: string, callback: () => Promise<void>): Promise<boolean> {
 		const notice = new Notice(message, 0);
 
 		try {
 			await callback();
+			return true;
 		} catch (error) {
 			const errorMessage = error instanceof Error ? error.message : String(error);
 			const noticeMessage = error instanceof LocalizedSyncError
@@ -5114,6 +5256,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 				: this.t("noticeSyncFailed", { message: errorMessage });
 			new Notice(noticeMessage, 10000);
 			console.error("[Feishu Docs Publisher] operation failed", error);
+			return false;
 		} finally {
 			notice.hide();
 		}
@@ -5722,6 +5865,15 @@ class LarkCliSyncSettingTab extends PluginSettingTab {
 						}
 					},
 					{
+						name: t("settingDeleteMissingRemoteName"),
+						desc: t("settingDeleteMissingRemoteDesc"),
+						control: {
+							type: "toggle",
+							key: "deleteMissingRemote",
+							defaultValue: DEFAULT_SETTINGS.deleteMissingRemote
+						}
+					},
+					{
 						name: t("settingStateCacheName"),
 						desc: t("settingStateCacheDesc"),
 						control: {
@@ -5788,6 +5940,9 @@ class LarkCliSyncSettingTab extends PluginSettingTab {
 			case "autoSyncMode":
 				settings.autoSyncMode = value === "manual" || value === "pre-push" ? value : "save";
 				refreshSettings = true;
+				break;
+			case "deleteMissingRemote":
+				settings.deleteMissingRemote = value === true;
 				break;
 			case "autoSyncDelaySeconds":
 				settings.autoSyncDelaySeconds = this.normalizePositiveInteger(value, DEFAULT_SETTINGS.autoSyncDelaySeconds);

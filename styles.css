@@ -116,3 +116,9 @@ button.feishu-lark-settings-hidden {
 .feishu-lark-published-feedback.is-error {
 	color: var(--text-error);
 }
+
+.feishu-lark-delete-list {
+	max-height: 40vh;
+	overflow-y: auto;
+	overflow-wrap: anywhere;
+}

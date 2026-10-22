@@ -32,6 +32,7 @@ await esbuild.build({
 						constructor(message, timeout) {
 							globalThis.__obsidianNotices?.push({ message, timeout });
 						}
+						hide() {}
 					}
 					export class Plugin {}
 					export class PluginSettingTab {}
@@ -1354,6 +1355,116 @@ upgradePlugin.runNpmCapture = async (args) => {
 upgradePlugin.getLarkCliManagementStatus = async () => ({ ...cliStatus, installed: true, version: "1.0.98", updateAvailable: false });
 await upgradePlugin.installOrUpgradeLarkCli();
 assert.deepEqual(upgradeCommands, [["install", "-g", "@larksuite/cli@latest", "--no-audit", "--no-fund"]]);
+
+// Deleting remote files whose local file is gone is opt-in, confirmed, and limited to published files.
+function createCleanupPlugin() {
+	const plugin = createPublishingPlugin();
+	plugin.settings.deleteMissingRemote = true;
+	const pdf = (fileToken) => ({ version: 1, key: "k", vaultPath: "Team/Scan.pdf", parent: { kind: "drive", token: "" },
+		scope: "user", fileName: "Scan.pdf", contentHash: "", size: 1, status: "published", fileToken,
+		url: `https://example.feishu.cn/file/${fileToken}`, updatedAt: "" });
+	plugin.settings.documentBindings = {
+		"Team/Old.md": { token: "doc-old", url: "https://example.feishu.cn/docx/doc-old", containerKind: "drive" },
+		"Team/Kept.md": { token: "doc-kept", url: "https://example.feishu.cn/docx/doc-kept" },
+		"Team/Moved.md": { token: "doc-moved", url: "https://example.feishu.cn/docx/doc-moved" },
+		"Team/Was.md": { token: "doc-moved", url: "https://example.feishu.cn/docx/doc-moved" },
+		"Team/Wiki.md": { token: "wiki-doc", url: "https://example.feishu.cn/wiki/node1", nodeToken: "node1", containerKind: "wiki" },
+		"Team/Parent.md": { token: "parent-doc", url: "https://example.feishu.cn/wiki/node2", nodeToken: "node2", containerKind: "wiki" },
+		"Other/Out.md": { token: "doc-out", url: "https://example.feishu.cn/docx/doc-out" }
+	};
+	plugin.settings.pdfBindings = { "Team/Scan.pdf": pdf("pdf-1") };
+	const existing = new Set(["Team/Kept.md", "Team/Moved.md"]);
+	plugin.app.vault = {
+		getMarkdownFiles: () => [...existing].map((path) => ({ path, extension: "md" })),
+		getAbstractFileByPath: (path) => existing.has(path) ? { path } : null
+	};
+	plugin.calls = [];
+	plugin.confirmed = [];
+	plugin.confirmAnswer = true;
+	plugin.confirmDeleteMissingRemote = async (missing) => { plugin.confirmed.push(missing.map((file) => file.path)); return plugin.confirmAnswer; };
+	plugin.listRemoteWikiNodes = async (parent) => parent.token === "node2" ? [{ node_token: "child" }] : [];
+	plugin.runLarkCli = async (args) => {
+		plugin.calls.push(args.join(" "));
+		if (args[0] === "wiki" && args[1] === "+node-get") {
+			const token = args[args.indexOf("--node-token") + 1];
+			const objToken = token === "node1" ? "wiki-doc" : "parent-doc";
+			return { ok: true, data: { node: { node_token: token, obj_token: objToken, obj_type: "docx", space_id: "space" } } };
+		}
+		if (plugin.failDeleteOf && args.includes(plugin.failDeleteOf)) throw new Error(plugin.deleteError);
+		return { ok: true, data: { deleted: true } };
+	};
+	return plugin;
+}
+
+const offPlugin = createCleanupPlugin();
+offPlugin.settings.deleteMissingRemote = false;
+await offPlugin.cleanupMissingRemoteFiles("Team");
+assert.deepEqual([offPlugin.confirmed, offPlugin.calls], [[], []], "the option is off by default");
+
+const declinePlugin = createCleanupPlugin();
+declinePlugin.confirmAnswer = false;
+await declinePlugin.cleanupMissingRemoteFiles("Team");
+assert.deepEqual(declinePlugin.confirmed, [["Team/Old.md", "Team/Parent.md", "Team/Scan.pdf", "Team/Wiki.md"]],
+	"only published files missing locally are offered; moved, existing and out-of-folder files are not");
+assert.deepEqual(declinePlugin.calls, []);
+assert.ok(declinePlugin.settings.documentBindings["Team/Old.md"], "declining keeps every binding");
+
+const deletePlugin = createCleanupPlugin();
+globalThis.__obsidianNotices = [];
+await deletePlugin.cleanupMissingRemoteFiles("Team");
+assert.deepEqual(deletePlugin.calls, [
+	"drive +delete --as user --file-token doc-old --type docx --yes --json",
+	"wiki +node-get --as user --node-token node2 --json",
+	"drive +delete --as user --file-token pdf-1 --type file --yes --json",
+	"wiki +node-get --as user --node-token node1 --json",
+	"wiki +node-delete --as user --node-token node1 --obj-type wiki --include-children=false --yes --json"
+]);
+assert.deepEqual(Object.keys(deletePlugin.settings.documentBindings).sort(),
+	["Other/Out.md", "Team/Kept.md", "Team/Moved.md", "Team/Parent.md", "Team/Was.md"],
+	"deleted files lose their binding; a wiki doc with child pages, the moved note and others stay");
+assert.deepEqual(Object.keys(deletePlugin.settings.pdfBindings), []);
+assert.deepEqual(globalThis.__obsidianNotices.map((notice) => notice.message).filter((message) => !message.startsWith("正在")), [
+	"已删除 3 个本地已不存在的飞书文件。",
+	"有 1 个飞书文档下还有子页面，已跳过未删除。"
+]);
+delete globalThis.__obsidianNotices;
+
+// A file already deleted by hand only needs its stale binding cleared; other failures keep the binding.
+const gonePlugin = createCleanupPlugin();
+gonePlugin.failDeleteOf = "doc-old";
+gonePlugin.deleteError = "file has been delete.";
+await gonePlugin.cleanupMissingRemoteFiles("Team");
+assert.equal(gonePlugin.settings.documentBindings["Team/Old.md"], undefined);
+const failPlugin = createCleanupPlugin();
+failPlugin.failDeleteOf = "doc-old";
+failPlugin.deleteError = "permission denied";
+globalThis.__obsidianNotices = [];
+await failPlugin.cleanupMissingRemoteFiles("Team");
+assert.ok(failPlugin.settings.documentBindings["Team/Old.md"], "a failed delete keeps the binding for the next attempt");
+assert.equal(failPlugin.settings.pdfBindings["Team/Scan.pdf"], undefined, "other files are still deleted");
+assert.ok(globalThis.__obsidianNotices.some((notice) => notice.message.includes("Team/Old.md: permission denied")));
+delete globalThis.__obsidianNotices;
+
+// A wiki node whose type or token no longer matches is never deleted.
+const changedPlugin = createCleanupPlugin();
+const baseRunLarkCli = changedPlugin.runLarkCli;
+changedPlugin.runLarkCli = async (args) => {
+	if (args[1] === "+node-get") return { ok: true, data: { node: { node_token: "node1", obj_token: "someone-else", obj_type: "docx", space_id: "space" } } };
+	return baseRunLarkCli(args);
+};
+await changedPlugin.cleanupMissingRemoteFiles("Team");
+assert.ok(!changedPlugin.calls.some((call) => call.includes("+node-delete")));
+assert.ok(changedPlugin.settings.documentBindings["Team/Wiki.md"]);
+
+// Folder sync only cleans up after it succeeded.
+for (const [syncOk, expected] of [[true, 1], [false, 0]]) {
+	const syncPlugin = createCleanupPlugin();
+	globalThis.__obsidianNotices = [];
+	syncPlugin.publishFolderInternal = async () => { if (!syncOk) throw new Error("sync failed"); };
+	await syncPlugin.publishFolder("Team");
+	assert.equal(syncPlugin.confirmed.length, expected);
+	delete globalThis.__obsidianNotices;
+}
 
 const galleryRoot = await mkdtemp(join(tmpdir(), "image-gallery-main-"));
 try {
