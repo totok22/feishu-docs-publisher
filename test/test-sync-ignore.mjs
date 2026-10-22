@@ -108,6 +108,37 @@ try {
 	assert.equal(edit("*.md\n", "top.md", false, false), "*.md\n!/top.md\n");
 	assert.equal(edit("*.md\n!/top.md\n", "top.md", false, true), "*.md\n", "ignoring again removes the exception");
 	assert.equal(edit("# mine\n*.md\n", "top.md", false, true), "# mine\n*.md\n");
+	// Checking a partial folder restores all descendants covered by handwritten wildcards,
+	// and keeps siblings outside that folder ignored.
+	for (const pattern of ["*.md", "**/*.md", "Notes/**", "Notes/*", "*.md\n!/Notes/**\nNotes/*.md"]) {
+		const included = edit(`${pattern}\n`, "Notes", true, false);
+		for (const line of pattern.split("\n").filter((line) => !line.startsWith("!"))) {
+			assert.ok(included.split("\n").includes(line), "handwritten wildcard rules are preserved");
+		}
+		for (const node of treeIndex.values()) {
+			if (node.path.startsWith("Proj/Notes/")) {
+				assert.equal(rulesFor(included).isIgnored(node.path, node.isFolder), false, `${pattern}: ${node.path}`);
+			}
+		}
+		assert.equal(rulesFor(included).isIgnored("Proj/Notes/future/deep/new.md"), false);
+		if (pattern.includes("*.md")) assert.equal(rulesFor(included).isIgnored("Proj/Docs/x.md"), true);
+		const ignoredAgain = edit(included, "Notes", true, true);
+		assert.equal(rulesFor(ignoredAgain).isIgnored("Proj/Notes/a.md"), true);
+	}
+	// A deeper rule file cannot be overridden from this page; report its descendant
+	// instead of claiming that the whole folder was successfully included.
+	const nestedRules = (text) => {
+		const nested = rulesFor(text);
+		nested.setFile("Proj/Notes/Private", "/c.md\n");
+		return nested;
+	};
+	const nestedContext = { ...ctx,
+		isIgnored: (text, path, folder) => nestedRules(text).isIgnored(`Proj/${path}`, folder),
+		explain: (text, path, folder) => JSON.stringify(nestedRules(text).explain(`Proj/${path}`, folder))
+	};
+	const blockedSubtree = setPathIgnored("*.md\n", "Notes", true, false, nestedContext);
+	assert.equal(blockedSubtree.ok, false);
+	assert.match(blockedSubtree.reason, /Proj\/Notes\/Private/);
 	// A folder ignored by a wildcard cannot be reopened for a single file, and the page says why.
 	const blocked = setPathIgnored("Private/\n", "Notes/Private/c.md", false, false, ctx);
 	assert.equal(blocked.ok, false);

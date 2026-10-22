@@ -9,6 +9,7 @@ import {
 	buildPlaceholderRemoveArgs,
 	buildSyncPlan,
 	createSyncContentSignature,
+	createMediaUploadJournal,
 	findReferencingMarkdownFiles,
 	invalidateLocalImageSyncState,
 	materializeLocalImages,
@@ -165,11 +166,14 @@ try {
 	assert.deepEqual(deleted, ["first", "second"]);
 	assert.doesNotMatch(snapshot.content, /FEISHU_LARK_LOCAL_IMAGE_/);
 
-	// An image already placed behind its placeholder by an interrupted sync is reused, not uploaded twice.
+	// A recorded upload survives a restart and is reused by block id, not by name.
 	const resumeXml = `<title id="title">Note</title><img id="done" name="root.png" src="x"/><p id="first">${firstImage.placeholder}</p><img id="uploaded" name="root.png" src="y"/>`;
 	let resumeState = resumeXml;
 	const resumeCalls = [];
+	const journalDirectory = join(workspace, "media-uploads");
+	await createMediaUploadJournal(journalDirectory, "resume-doc").save(firstImage, "uploaded");
 	const resumeSnapshot = await materializeLocalImages([firstImage], {
+		uploadJournal: createMediaUploadJournal(journalDirectory, "resume-doc"),
 		async fetchRemoteWithIds() { return { content: resumeState, revisionId: 1 }; },
 		async insertImage() { resumeCalls.push("insert"); return { blockId: "never" }; },
 		async moveBlockAfter() { resumeCalls.push("move"); },
@@ -180,24 +184,67 @@ try {
 	});
 	assert.deepEqual(resumeCalls, ["delete first"]);
 	assert.equal(resumeSnapshot.content, `<title id="title">Note</title><img id="done" name="root.png" src="x"/><img id="uploaded" name="root.png" src="y"/>`);
+	assert.equal(await createMediaUploadJournal(journalDirectory, "resume-doc").load(firstImage), undefined,
+		"completed uploads leave no pending record");
 
-	// An image with another name behind the placeholder does not count as the uploaded one.
-	let otherState = `<p id="first">${firstImage.placeholder}</p><img id="other" name="other.png" src="z"/>`;
-	const otherCalls = [];
-	await materializeLocalImages([firstImage], {
-		async fetchRemoteWithIds() { return { content: otherState, revisionId: 1 }; },
+	// Adjacent images, including the same basename with different contents/dimensions,
+	// never stand in for a new upload. A stale record after an overwrite is also ignored.
+	for (const name of ["other.png", "root.png"]) {
+		let otherState = `<p id="first">${firstImage.placeholder}</p><img id="other" name="${name}" src="z"/>`;
+		const otherCalls = [];
+		const uploadJournal = createMediaUploadJournal(journalDirectory, `new-${name}`);
+		await uploadJournal.save(firstImage, "removed-by-overwrite");
+		await materializeLocalImages([firstImage], {
+			uploadJournal,
+			async fetchRemoteWithIds() { return { content: otherState, revisionId: 1 }; },
+			async insertImage() {
+				otherCalls.push("insert");
+				otherState += '<img id="new-image" name="root.png" src="n"/>';
+				return { blockId: "new-image" };
+			},
+			async moveBlockAfter() {
+				otherCalls.push("move");
+				otherState = otherState.replace('<img id="new-image" name="root.png" src="n"/>', "")
+					.replace('</p>', '</p><img id="new-image" name="root.png" src="n"/>');
+			},
+			async deleteBlock(blockId) {
+				otherCalls.push(`delete ${blockId}`);
+				otherState = otherState.replace(new RegExp(`<p id="${blockId}">[^<]+</p>`), "");
+			}
+		});
+		assert.deepEqual(otherCalls, ["insert", "move", "delete first"]);
+		assert.equal((otherState.match(/<img\b/g) || []).length, 2);
+	}
+
+	// An interruption between append and move resumes the recorded block at the end.
+	let interruptedXml = `<p id="first">${firstImage.placeholder}</p><p id="tail">tail</p>`;
+	let uploadCount = 0;
+	const interruptedHost = {
+		uploadJournal: createMediaUploadJournal(journalDirectory, "interrupted-doc"),
+		async fetchRemoteWithIds() { return { content: interruptedXml, revisionId: 1 }; },
 		async insertImage() {
-			otherCalls.push("insert");
-			otherState = otherState.replace("<img id=\"other\"", "<img id=\"new-image\" name=\"root.png\" src=\"n\"/><img id=\"other\"");
-			return { blockId: "new-image" };
+			uploadCount++;
+			interruptedXml += '<img id="pending" name="root.png"/>';
+			return { blockId: "pending" };
 		},
-		async moveBlockAfter() { otherCalls.push("move"); },
+		async moveBlockAfter() { throw new Error("interrupted before move"); },
 		async deleteBlock(blockId) {
-			otherCalls.push(`delete ${blockId}`);
-			otherState = otherState.replace(new RegExp(`<p id="${blockId}">[^<]+</p>`), "");
+			interruptedXml = interruptedXml.replace(new RegExp(`<p id="${blockId}">[^<]+</p>`), "");
+		}
+	};
+	await assert.rejects(materializeLocalImages([firstImage], interruptedHost), /interrupted before move/);
+	assert.equal(await createMediaUploadJournal(journalDirectory, "another-doc").load(firstImage), undefined,
+		"the same image in a different document has its own record");
+	await materializeLocalImages([firstImage], {
+		...interruptedHost,
+		uploadJournal: createMediaUploadJournal(journalDirectory, "interrupted-doc"),
+		async moveBlockAfter() {
+			interruptedXml = interruptedXml.replace('<img id="pending" name="root.png"/>', "")
+				.replace('</p>', '</p><img id="pending" name="root.png"/>');
 		}
 	});
-	assert.deepEqual(otherCalls, ["insert", "move", "delete first"]);
+	assert.equal(uploadCount, 1, "a restart never reuploads the already recorded block");
+	assert.equal(interruptedXml, '<img id="pending" name="root.png"/><p id="tail">tail</p>');
 
 	// A copy of the placeholder left by an interrupted sync is cleaned up instead of failing the retry.
 	let strayXml = `<title id="title">Note</title><p id="first">${firstImage.placeholder}</p><p id="stray">${firstImage.placeholder}</p>`;

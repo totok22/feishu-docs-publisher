@@ -133,6 +133,7 @@ import {
 	buildPlaceholderRemoveArgs,
 	materializeLocalImages as materializePreparedLocalImages
 } from "./media-sync-orchestrator";
+import { createMediaUploadJournal } from "./media-upload-journal";
 
 import {
 	buildImageGalleryBody,
@@ -2507,8 +2508,6 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		const images = this.app.vault.getFiles().filter((file) => isSupportedImagePath(file.path)
 			&& this.isPathWithin(file.path, folderPath) && !this.isFolderDisconnected(file.path)
 			&& !this.isSyncIgnored(file.path));
-		if (images.length === 0) return 0;
-
 		// Ignored notes stay in the list: they still occupy their paths and still embed images that must not be re-collected.
 		const notes = await Promise.all(this.collectMarkdownFiles(folderPath)
 			.filter((file) => !this.isFolderDisconnected(file.path))
@@ -2516,7 +2515,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		const plans = planImageGalleries({
 			imagePaths: images.map((file) => file.path),
 			notes: notes.map(({ file, content }) => ({ path: file.path, isGallery: isImageGalleryContent(content) })),
-			referencedImagePaths: collectReferencedLocalImagePaths(
+			referencedImagePaths: images.length === 0 ? new Set<string>() : collectReferencedLocalImagePaths(
 				notes.filter(({ content }) => !isImageGalleryContent(content))
 					.map(({ file, content }) => ({ path: file.path, content })),
 				await buildLocalImageFileIndex(this.getVaultRoot())
@@ -2556,7 +2555,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			if (kind !== "wiki" && kind !== "my_library") continue;
 			const suffix = remotePath.slice(root.length).replace(/^\/+/, "");
 			const localPath = [folderPath, suffix].filter(Boolean).join("/");
-			if (this.isFolderDisconnected(localPath) || this.isSyncIgnored(localPath)) continue;
+			if (this.isFolderDisconnected(localPath) || this.isSyncIgnored(localPath, true)) continue;
 			this.assertRemoteBindingExclusive(localPath, binding);
 			const parentBinding = this.settings.folderBindings[this.getFolderBindingKey(rootParent, this.parentPath(remotePath))];
 			const parent = { kind, token: binding.containerToken ?? parentBinding?.token ?? rootParent.token };
@@ -2574,7 +2573,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 				|| !this.isPathWithin(remotePath, remoteRoot)) continue;
 			const suffix = remotePath.slice(remoteRoot.length).replace(/^\/+/, "");
 			const localPath = [folderPath, suffix].filter(Boolean).join("/");
-			if (this.isFolderDisconnected(localPath) || this.isSyncIgnored(localPath)) continue;
+			if (this.isFolderDisconnected(localPath) || this.isSyncIgnored(localPath, true)) continue;
 			const kind = binding.containerKind || rootParent.kind;
 			if (kind !== "wiki" && kind !== "my_library" && !binding.url.includes("/wiki/")) continue;
 			await this.ensureFolderPageList(binding, localPath, overwrite);
@@ -3827,6 +3826,9 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		images: LocalImageResource[]
 	): Promise<{ content: string; revisionId?: number } | undefined> {
 		return await materializePreparedLocalImages(images, {
+			uploadJournal: images.length > 0
+				? createMediaUploadJournal(join(this.getPluginDirectoryPath(), "media-uploads"), getDocumentStateKey(doc))
+				: undefined,
 			fetchRemoteWithIds: async () => {
 				const remote = await this.fetchLarkDocumentWithIds(doc);
 				return { content: remote.content, revisionId: remote.revisionId };
@@ -5353,8 +5355,8 @@ exec "${nodePath}" "${scriptPath}" "$@"
 	}
 
 	/** Listed in a .feishuignore: skipped by folder sync, auto-sync, and the pre-push hook. Call refreshIgnoreRules first. */
-	private isSyncIgnored(path: string): boolean {
-		return (this.ignoreRules ??= new IgnoreRules()).isIgnored(path);
+	private isSyncIgnored(path: string, isDirectory = false): boolean {
+		return (this.ignoreRules ??= new IgnoreRules()).isIgnored(path, isDirectory);
 	}
 
 	/** Re-read every rule file that can apply to these paths. A rule file that cannot be read stops the sync rather than being skipped. */
@@ -5488,6 +5490,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 						notice.setMessage(`${base}\n${message}`);
 						report?.(message);
 					}));
+					await this.cleanupMissingRemoteFiles(entry.path);
 					return;
 				}
 				const file = this.app.vault.getAbstractFileByPath(entry.path);

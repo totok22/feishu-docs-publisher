@@ -189,7 +189,26 @@ export function setPathIgnored(
 		const spare = formatRule(target, isFolder, true);
 		if (!lines.includes(spare)) lines.push(spare);
 	}
-	return check() ? { ok: false, reason: ctx.explain(joinLines(lines), target, isFolder) } : { ok: true, text: joinLines(lines) };
+	// A folder may be included while its descendants are still covered by wildcard
+	// rules. Re-include the subtree, then verify deeper rule files did not block it.
+	const findIgnored = (path: string, folder: boolean): { path: string; isFolder: boolean } | undefined => {
+		if (ctx.isIgnored(joinLines(lines), path, folder)) return { path, isFolder: folder };
+		if (folder) {
+			for (const child of ctx.listChildren(path)) {
+				const ignored = findIgnored(child.path, child.isFolder);
+				if (ignored) return ignored;
+			}
+		}
+		return undefined;
+	};
+	if (isFolder && !check() && findIgnored(target, true)) {
+		const spareSubtree = `!/${escapePattern(target)}/**`;
+		lines = lines.filter((line) => line !== spareSubtree);
+		lines.push(spareSubtree);
+	}
+	const blocked = findIgnored(target, isFolder);
+	return blocked ? { ok: false, reason: ctx.explain(joinLines(lines), blocked.path, blocked.isFolder) }
+		: { ok: true, text: joinLines(lines) };
 }
 
 /** Once every child of a folder has its own plain rule, one rule for the folder says the same and also covers new files. */

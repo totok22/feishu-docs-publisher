@@ -623,7 +623,7 @@ function createPublishingPlugin() {
 	plugin.app = {
 		metadataCache: { getFileCache: () => null },
 		vault: { getMarkdownFiles: () => [], getAbstractFileByPath: () => null,
-			read: async () => { throw new Error("Frontmatter-off publishing must not edit the note"); } },
+			read: async () => "# Note\n\nBody" },
 		fileManager: { processFrontMatter: async () => { throw new Error("Unexpected frontmatter write"); } }
 	};
 	plugin.readNoteForLark = async () => ({ content: "# Note\n\nBody", images: [] });
@@ -727,6 +727,7 @@ const orderedEvents = [];
 queuedPlugin.syncFileUnlocked = async () => { orderedEvents.push("manual-start");
 	await new Promise((resolve) => setTimeout(resolve, 5)); orderedEvents.push("manual-end"); throw new Error("manual failure"); };
 queuedPlugin.withDeferredLarkSyncStateSave = async (callback) => callback();
+queuedPlugin.ensureImageGalleryNotes = async () => 0;
 queuedPlugin.collectMarkdownFiles = () => { orderedEvents.push("folder-start"); return []; };
 queuedPlugin.app.vault.getFiles = () => [];
 const orderedResults = await Promise.allSettled([
@@ -1459,14 +1460,19 @@ await changedPlugin.cleanupMissingRemoteFiles("Team");
 assert.ok(!changedPlugin.calls.some((call) => call.includes("+node-delete")));
 assert.ok(changedPlugin.settings.documentBindings["Team/Wiki.md"]);
 
-// Folder sync only cleans up after it succeeded.
-for (const [syncOk, expected] of [[true, 1], [false, 0]]) {
-	const syncPlugin = createCleanupPlugin();
-	globalThis.__obsidianNotices = [];
-	syncPlugin.publishFolderInternal = async () => { if (!syncOk) throw new Error("sync failed"); };
-	await syncPlugin.publishFolder("Team");
-	assert.equal(syncPlugin.confirmed.length, expected);
-	delete globalThis.__obsidianNotices;
+// Both folder-sync entry points clean up only after a successful sync.
+for (const entryPoint of ["context-menu", "published-files"]) {
+	for (const [syncOk, expected] of [[true, 1], [false, 0]]) {
+		const syncPlugin = createCleanupPlugin();
+		globalThis.__obsidianNotices = [];
+		syncPlugin.publishFolderInternal = async () => { if (!syncOk) throw new Error("sync failed"); };
+		const sync = () => entryPoint === "context-menu" ? syncPlugin.publishFolder("Team")
+			: syncPlugin.publishedLinksHost().sync({ id: "folder:Team", kind: "folder", path: "Team", url: "" });
+		if (!syncOk && entryPoint === "published-files") await assert.rejects(sync(), /sync failed/);
+		else await sync();
+		assert.equal(syncPlugin.confirmed.length, expected, entryPoint);
+		delete globalThis.__obsidianNotices;
+	}
 }
 
 // Sync ignore: what a .feishuignore lists is skipped by folder sync, auto-sync and remote cleanup.
@@ -1485,6 +1491,33 @@ assert.equal(ignorePlugin.isSyncIgnored("Root/Privates/a.md"), false);
 assert.equal(ignorePlugin.isSyncIgnored("Root/draft.md"), true);
 assert.equal(ignorePlugin.isSyncIgnored("Other/draft.md"), false, "a rule file only reaches its own folder");
 assert.equal(createPlugin().isSyncIgnored("Root/draft.md"), false, "no rule file, nothing ignored");
+
+// Directory-only rules protect the folder page itself from writes and duplicate deletion.
+const ignoredPagesPlugin = createPublishingPlugin();
+useIgnoreFiles(ignoredPagesPlugin, { "Root/.feishuignore": "/Private/\n" });
+await ignoredPagesPlugin.refreshIgnoreRules(["Root/Private/", "Root/Visible/"]);
+const pageRoot = { kind: "wiki", token: "parent" };
+ignoredPagesPlugin.settings.folderBindings = Object.fromEntries(["", "/Private", "/Private/Child", "/Visible"].map((suffix) => [
+	`target|wiki|parent|Remote${suffix}`, { token: `doc${suffix}`, url: `https://example.feishu.cn/wiki/node${suffix}`, containerKind: "wiki" }
+]));
+const pageWrites = [], duplicateChecks = [];
+ignoredPagesPlugin.ensureFolderPageList = async (_binding, path) => { pageWrites.push(path); };
+ignoredPagesPlugin.assertRemoteBindingExclusive = () => {};
+ignoredPagesPlugin.cleanupRemoteDuplicates = async (path) => { duplicateChecks.push(path); return 0; };
+for (const overwrite of [false, true]) {
+	pageWrites.length = 0;
+	await ignoredPagesPlugin.syncFolderPageLists("Root", "Remote", pageRoot, overwrite);
+	assert.deepEqual(pageWrites, ["Root", "Root/Visible"], "ignored folder pages and descendants are untouched");
+}
+await ignoredPagesPlugin.consolidateOverwriteFolderPages("Root", "Remote", pageRoot);
+assert.deepEqual(duplicateChecks, ["Root", "Root/Visible"]);
+useIgnoreFiles(ignoredPagesPlugin, { ".feishuignore": "/Root/\n" });
+await ignoredPagesPlugin.refreshIgnoreRules(["Root/"]);
+pageWrites.length = 0;
+duplicateChecks.length = 0;
+await ignoredPagesPlugin.syncFolderPageLists("Root", "Remote", pageRoot, true);
+await ignoredPagesPlugin.consolidateOverwriteFolderPages("Root", "Remote", pageRoot);
+assert.deepEqual([pageWrites, duplicateChecks], [[], []], "an ignored sync root protects its own page too");
 
 // A rule file is looked up in the file's folder and every folder above it, including the vault root.
 const stackedPlugin = createPublishingPlugin();
@@ -1715,8 +1748,75 @@ try {
 	imageOnlyPlugin.withDeferredLarkSyncStateSave = async (callback) => callback();
 	imageOnlyPlugin.readNoteForLark = async (file) => { throw new Error(`reached ${file.path}`); };
 	await assert.rejects(imageOnlyPlugin.publishFolderInternal("Root/Shots"), /reached Root\/Shots\/Shots 图片\.md/);
+
+	// Empty galleries are refreshed even when no eligible images remain anywhere in the scope.
+	for (const mode of ["deleted", "ignored", "ignored-gallery"]) {
+		contents.clear();
+		const galleryPath = "Root/Shots/Shots 图片.md";
+		const original = "---\nlark_url: https://example.feishu.cn/docx/shots\n---\n\n<!-- feishu-docs-publisher:image-gallery -->\n\n![[Root/Shots/a.png]]\n";
+		contents.set(galleryPath, original);
+		writes.length = 0;
+		const emptyGalleryPlugin = createGalleryPlugin();
+		const remainingImages = mode === "deleted" ? [] : [{ path: "Root/Shots/a.png", extension: "png" }];
+		emptyGalleryPlugin.app.vault.getFiles = () => remainingImages;
+		useIgnoreFiles(emptyGalleryPlugin, { "Root/.feishuignore": mode === "ignored-gallery" ? "*.png\n*.md\n" : "*.png\n" });
+		await emptyGalleryPlugin.refreshIgnoreRules([galleryPath]);
+		await emptyGalleryPlugin.ensureImageGalleryNotes("Root");
+		if (mode === "ignored-gallery") {
+			assert.equal(contents.get(galleryPath), original, "an ignored gallery is never rewritten");
+			assert.deepEqual(writes, []);
+		} else {
+			assert.deepEqual(writes, [{ kind: "modify", path: galleryPath }]);
+			assert.equal(contents.get(galleryPath), "---\nlark_url: https://example.feishu.cn/docx/shots\n---\n\n<!-- feishu-docs-publisher:image-gallery -->\n");
+		}
+	}
 } finally {
 	await rm(galleryRoot, { force: true, recursive: true });
+}
+
+// The plugin writes a durable upload record before deleting the placeholder;
+// a new instance can resume through the document's URL/token aliases.
+const mediaRoot = await mkdtemp(join(tmpdir(), "image-recovery-main-"));
+try {
+	const image = {
+		placeholder: `FEISHU_LARK_LOCAL_IMAGE_${"a".repeat(64)}`,
+		absolutePath: join(mediaRoot, "photo.png"), vaultPath: "new/photo.png"
+	};
+	const placeholderBlock = `<p id="placeholder">${image.placeholder}</p>`;
+	const uploadedBlock = '<img id="new-upload" name="photo.png"/>';
+	let remoteXml = `${placeholderBlock}<img id="existing" name="photo.png"/>`;
+	let uploads = 0, moves = 0, failDeletion = true;
+	const createRecoveryPlugin = () => {
+		const plugin = createPlugin();
+		plugin.getPluginDirectoryPath = () => mediaRoot;
+		plugin.fetchLarkDocumentWithIds = async () => ({ doc: "doc-token", content: remoteXml, revisionId: 1 });
+		plugin.runLarkCli = async (args) => {
+			if (args.includes("+media-insert")) {
+				uploads++;
+				remoteXml += uploadedBlock;
+				return { data: { block_id: "new-upload" } };
+			}
+			const command = args[args.indexOf("--command") + 1];
+			if (command === "block_move_after") {
+				moves++;
+				remoteXml = remoteXml.replace(uploadedBlock, "").replace(placeholderBlock, placeholderBlock + uploadedBlock);
+			} else if (command === "block_delete") {
+				if (failDeletion) throw new Error("interrupted before deleting placeholder");
+				remoteXml = remoteXml.replace(placeholderBlock, "");
+			} else assert.fail(`Unexpected media command: ${args.join(" ")}`);
+			return { data: {} };
+		};
+		return plugin;
+	};
+	await assert.rejects(createRecoveryPlugin().materializeLocalImages("https://example.feishu.cn/docx/doc-token", [image]),
+		/interrupted before deleting placeholder/);
+	failDeletion = false;
+	await createRecoveryPlugin().materializeLocalImages("doc-token", [image]);
+	assert.equal(uploads, 1, "a new plugin instance reuses the recorded block id");
+	assert.equal(moves, 1, "an already placed upload is never moved again");
+	assert.equal(remoteXml, `${uploadedBlock}<img id="existing" name="photo.png"/>`);
+} finally {
+	await rm(mediaRoot, { recursive: true, force: true });
 }
 
 console.log("main plugin tests passed");

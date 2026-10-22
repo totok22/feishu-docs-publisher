@@ -8,6 +8,7 @@ import {
 	createContentHash,
 	createDocumentSyncStateFromRemote,
 	createSyncContentSignature,
+	createMediaUploadJournal,
 	getDocumentStateKey,
 	prepareLocalImages
 } from "../lark-sync-core.mjs";
@@ -90,6 +91,7 @@ async function run() {
 		await testWindowsSystemNotificationOnFailure(workspace);
 		await testImageOnlyChangeSyncsReferencingDocument(workspace);
 		await testImageOnlyChangeSyncsReferencingDocument(workspace, true);
+		await testRecordedMediaUploadResumes(workspace);
 		await testLegacyPluginDataFallback(workspace);
 		await testCurrentPluginDataPrecedesLegacy(workspace);
 	} finally {
@@ -1442,6 +1444,41 @@ async function testImageOnlyChangeSyncsReferencingDocument(workspace, persistedB
 	const remoteState = JSON.parse(await readFile(mediaStatePath(workspace), "utf8"));
 	assert.match(remoteState.content, /<img id="uploaded-image"\/>/);
 	assert.doesNotMatch(remoteState.content, /FEISHU_LARK_LOCAL_IMAGE_/);
+}
+
+async function testRecordedMediaUploadResumes(workspace) {
+	// A record written by the plugin is readable by a fresh hook process, whether
+	// the upload was interrupted before or after moving the image into position.
+	for (const position of ["adjacent", "tail"]) {
+		await resetWorkspaceFiles(workspace);
+		const body = "Body\n\n![[diagram.png|320]]\n\nTail";
+		await writeFile(join(workspace, "diagram.png"), createPngBuffer(8, 4, 3));
+		await writeFile(join(workspace, "bound.md"), boundMarkdown("https://example.feishu.cn/docx/doc-token", body));
+		await execFileAsync("git", ["add", "bound.md", "diagram.png"], { cwd: workspace });
+		await writeSettings(workspace, { autoSyncMode: "pre-push", syncStrategy: "precise", language: "en" });
+		const prepared = await prepareLocalImages({ vaultRoot: workspace, markdownPath: "bound.md", content: `# bound\n\n${body}` });
+		const image = prepared.images[0];
+		const head = '<title id="doc-title">bound</title><p id="blk-1">Body</p>';
+		const uploaded = '<img id="uploaded-image"/>';
+		const tail = '<p id="tail">Tail</p>';
+		const finalXml = head + uploaded + tail;
+		const state = await createDocumentSyncStateFromRemote("doc-token", prepared.content, finalXml, 4);
+		await writeSyncStateRaw(workspace, { version: 1, documents: { "doc-token": state } });
+		await clearLog(workspace);
+		const placeholder = `<p id="image-placeholder">${image.placeholder}</p>`;
+		await writeFile(mediaStatePath(workspace), JSON.stringify({
+			content: head + placeholder + (position === "adjacent" ? uploaded + tail : tail + uploaded), revisionId: 4
+		}));
+		const journalDirectory = join(workspace, ".obsidian", "plugins", "feishu-docs-publisher", "media-uploads");
+		await createMediaUploadJournal(journalDirectory, "doc-token").save(image, "uploaded-image");
+		await runHook(workspace, { env: { LARK_CLI_MEDIA_FLOW: "1" } });
+		const log = await readLog(workspace);
+		assert.doesNotMatch(log, /\+media-insert/, "the hook reuses the plugin's recorded upload");
+		if (position === "adjacent") assert.doesNotMatch(log, /--command block_move_after/);
+		else assert.match(log, /--command block_move_after/);
+		assert.equal(JSON.parse(await readFile(mediaStatePath(workspace), "utf8")).content, finalXml);
+		assert.equal(await createMediaUploadJournal(journalDirectory, "doc-token").load(image), undefined);
+	}
 }
 
 async function resetWorkspaceFiles(workspace) {

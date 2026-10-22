@@ -1,5 +1,6 @@
 import { LocalImageResource } from "./local-image";
 import { basename } from "path";
+import type { MediaUploadJournal } from "./media-upload-journal";
 
 export interface RemoteMediaSnapshot {
 	content: string;
@@ -11,6 +12,7 @@ export interface InsertedMedia {
 }
 
 export interface MediaSyncHost {
+	uploadJournal?: MediaUploadJournal;
 	fetchRemoteWithIds(): Promise<RemoteMediaSnapshot>;
 	insertImage(image: LocalImageResource): Promise<InsertedMedia>;
 	moveBlockAfter(blockId: string, targetBlockId: string): Promise<void>;
@@ -36,27 +38,31 @@ export async function materializeLocalImages(
 	for (const image of images) {
 		const location = findPlaceholderLocation(snapshot.content, image.placeholder);
 		if (!location) {
+			await host.uploadJournal?.clear(image);
 			continue;
 		}
 
-		// The placeholder id hashes the image path and bytes, so an image of the same name right behind
-		// it was uploaded for it by an interrupted sync. Reuse it instead of uploading a duplicate.
-		let placedLocation = location;
-		if (!hasNamedImageAfter(snapshot.content, location, basename(image.absolutePath))) {
+		// Only a recorded block id proves which upload belongs to this placeholder.
+		// Names alone cannot distinguish different images or repeated embeds.
+		let blockId = await host.uploadJournal?.load(image);
+		if (!blockId || !hasImageBlock(snapshot.content, blockId)) {
 			// selection-with-ellipsis 会让飞书重建整篇文档的 block。先追加再移动，只影响新增图片和锚点。
-			const placeholderIsLastBlock = snapshot.content.slice(location.endIndex).trim() === "";
 			const insertedMedia = await host.insertImage(image);
-			// The image lands at the document end, so after a trailing placeholder it is already in
-			// place. Feishu rejects that move as "produced no document changes" and the sync aborts.
-			if (!placeholderIsLastBlock) {
-				await host.moveBlockAfter(insertedMedia.blockId, location.blockId);
-			}
+			blockId = insertedMedia.blockId;
+			// Save before moving: either operation can be interrupted independently.
+			await host.uploadJournal?.save(image, blockId);
 			snapshot = await host.fetchRemoteWithIds();
-			const uploadedLocation = findPlaceholderLocation(snapshot.content, image.placeholder);
-			if (!uploadedLocation || !hasImageAfter(snapshot.content, uploadedLocation, insertedMedia.blockId)) {
-				throw new Error(`图片上传后未出现在预期位置：${image.vaultPath}`);
-			}
-			placedLocation = uploadedLocation;
+		}
+		let placedLocation = findPlaceholderLocation(snapshot.content, image.placeholder);
+		if (!placedLocation) throw new Error(`图片上传后占位块不存在：${image.vaultPath}`);
+		// Avoid Feishu's no-op move error, including after a recovered upload.
+		if (!hasImageAfter(snapshot.content, placedLocation, blockId)) {
+			await host.moveBlockAfter(blockId, placedLocation.blockId);
+			snapshot = await host.fetchRemoteWithIds();
+			placedLocation = findPlaceholderLocation(snapshot.content, image.placeholder);
+		}
+		if (!placedLocation || !hasImageAfter(snapshot.content, placedLocation, blockId)) {
+			throw new Error(`图片上传后未出现在预期位置：${image.vaultPath}`);
 		}
 
 		await removePlaceholder(host, placedLocation, image.placeholder, snapshot.revisionId);
@@ -72,6 +78,7 @@ export async function materializeLocalImages(
 			await removePlaceholder(host, stray, image.placeholder, snapshot.revisionId);
 			snapshot = await host.fetchRemoteWithIds();
 		}
+		await host.uploadJournal?.clear(image);
 	}
 	return snapshot;
 }
@@ -200,16 +207,9 @@ function hasImageAfter(
 		.test(adjacentContent);
 }
 
-function hasNamedImageAfter(
-	remoteXml: string,
-	location: PlaceholderLocation,
-	fileName: string
-): boolean {
-	const adjacentContent = remoteXml.slice(location.endIndex).trimStart();
-	const names = [fileName, fileName.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-		.replace(/"/g, "&quot;").replace(/'/g, "&apos;")].map(escapeRegExp).join("|");
-	return new RegExp(`^<img\\b[^>]*\\bname=["'](?:${names})["'][^>]*(?:\\/>|>[\\s\\S]*?<\\/img>)`, "i")
-		.test(adjacentContent);
+function hasImageBlock(remoteXml: string, blockId: string): boolean {
+	return [...remoteXml.matchAll(/<img\b([^>]*)>/gi)]
+		.some((match) => readBlockId(match[1] || "") === blockId);
 }
 
 function readBlockId(attributes: string): string {

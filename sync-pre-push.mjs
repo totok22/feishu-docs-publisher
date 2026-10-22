@@ -44,6 +44,7 @@ import {
 	isSyncContentSignatureEquivalent,
 	mergeSyncStateFiles,
 	materializeLocalImages,
+	createMediaUploadJournal,
 	normalizeStateCacheRetainLimit,
 	prepareNoteContentForLark,
 	prepareLocalImages,
@@ -555,6 +556,7 @@ async function executeSyncPlanForTask(
 
 async function materializeImagesForTask(settings, doc, images) {
 	return await materializeLocalImages(images, {
+		uploadJournal: createMediaUploadJournal(join(pluginDirectoryPath, "media-uploads"), getDocumentStateKey(doc)),
 		fetchRemoteWithIds: async () => {
 			const remote = await fetchLarkDocumentWithIds(settings, doc);
 			return { content: remote.content, revisionId: remote.revisionId };
