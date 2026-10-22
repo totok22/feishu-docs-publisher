@@ -1383,7 +1383,9 @@ async function testImageOnlyChangeSyncsReferencingDocument(workspace, persistedB
 	assert.match(log, /docs \+update .*--command block_replace .*--block-id blk-image/);
 	assert.match(log, /docs \+media-insert .*--file .*diagram\.png/);
 	assert.doesNotMatch(log, /--selection-with-ellipsis/);
-	assert.match(log, /docs \+update .*--command block_move_after .*--block-id image-placeholder .*--src-block-ids uploaded-image/);
+	// The placeholder is the last block, so the appended image is already in place and Feishu
+	// rejects a move to the position it already holds.
+	assert.doesNotMatch(log, /--command block_move_after/);
 	assert.match(log, /docs \+update .*--command block_delete .*--block-id image-placeholder/);
 	assert.notEqual(previousImage.contentHash, (await prepareLocalImages({
 		vaultRoot: workspace,

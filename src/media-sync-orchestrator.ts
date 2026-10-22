@@ -18,6 +18,8 @@ export interface MediaSyncHost {
 	removePlaceholder(placeholder: string, revisionId?: number): Promise<void>;
 }
 
+const MAX_STRAY_PLACEHOLDERS = 5;
+
 type PlaceholderLocation =
 	| { mode: "standalone"; blockId: string; startIndex: number; endIndex: number }
 	| { mode: "embedded-checkbox"; blockId: string; startIndex: number; endIndex: number };
@@ -37,26 +39,54 @@ export async function materializeLocalImages(
 			continue;
 		}
 
-		// selection-with-ellipsis 会让飞书重建整篇文档的 block。先追加再移动，只影响新增图片和锚点。
-		const insertedMedia = await host.insertImage(image);
-		await host.moveBlockAfter(insertedMedia.blockId, location.blockId);
-		snapshot = await host.fetchRemoteWithIds();
-		const uploadedLocation = findPlaceholderLocation(snapshot.content, image.placeholder);
-		if (!uploadedLocation || !hasImageAfter(snapshot.content, uploadedLocation, insertedMedia.blockId)) {
-			throw new Error(`图片上传后未出现在预期位置：${image.vaultPath}`);
+		// The placeholder id hashes the image path and bytes, so an image of the same name right behind
+		// it was uploaded for it by an interrupted sync. Reuse it instead of uploading a duplicate.
+		let placedLocation = location;
+		if (!hasNamedImageAfter(snapshot.content, location, basename(image.absolutePath))) {
+			// selection-with-ellipsis 会让飞书重建整篇文档的 block。先追加再移动，只影响新增图片和锚点。
+			const placeholderIsLastBlock = snapshot.content.slice(location.endIndex).trim() === "";
+			const insertedMedia = await host.insertImage(image);
+			// The image lands at the document end, so after a trailing placeholder it is already in
+			// place. Feishu rejects that move as "produced no document changes" and the sync aborts.
+			if (!placeholderIsLastBlock) {
+				await host.moveBlockAfter(insertedMedia.blockId, location.blockId);
+			}
+			snapshot = await host.fetchRemoteWithIds();
+			const uploadedLocation = findPlaceholderLocation(snapshot.content, image.placeholder);
+			if (!uploadedLocation || !hasImageAfter(snapshot.content, uploadedLocation, insertedMedia.blockId)) {
+				throw new Error(`图片上传后未出现在预期位置：${image.vaultPath}`);
+			}
+			placedLocation = uploadedLocation;
 		}
 
-		if (uploadedLocation.mode === "standalone") {
-			await host.deleteBlock(uploadedLocation.blockId, snapshot.revisionId);
-		} else {
-			await host.removePlaceholder(image.placeholder, snapshot.revisionId);
-		}
+		await removePlaceholder(host, placedLocation, image.placeholder, snapshot.revisionId);
 		snapshot = await host.fetchRemoteWithIds();
-		if (snapshot.content.includes(image.placeholder)) {
-			throw new Error(`图片占位块删除后仍然存在：${image.vaultPath}`);
+
+		// An interrupted earlier sync can leave copies of the same placeholder behind. The image
+		// is already in place, so drop every remaining copy instead of failing on each retry.
+		for (let strays = 0; snapshot.content.includes(image.placeholder); strays += 1) {
+			const stray = findPlaceholderLocation(snapshot.content, image.placeholder);
+			if (!stray || strays >= MAX_STRAY_PLACEHOLDERS) {
+				throw new Error(`图片占位块删除后仍然存在：${image.vaultPath}`);
+			}
+			await removePlaceholder(host, stray, image.placeholder, snapshot.revisionId);
+			snapshot = await host.fetchRemoteWithIds();
 		}
 	}
 	return snapshot;
+}
+
+async function removePlaceholder(
+	host: MediaSyncHost,
+	location: PlaceholderLocation,
+	placeholder: string,
+	revisionId?: number
+): Promise<void> {
+	if (location.mode === "standalone") {
+		await host.deleteBlock(location.blockId, revisionId);
+	} else {
+		await host.removePlaceholder(placeholder, revisionId);
+	}
 }
 
 export function buildMediaInsertArgs(
@@ -167,6 +197,18 @@ function hasImageAfter(
 	const adjacentContent = remoteXml.slice(location.endIndex).trimStart();
 	const escapedBlockId = escapeRegExp(blockId);
 	return new RegExp(`^<img\\b[^>]*\\bid=["']${escapedBlockId}["'][^>]*(?:\\/>|>[\\s\\S]*?<\\/img>)`, "i")
+		.test(adjacentContent);
+}
+
+function hasNamedImageAfter(
+	remoteXml: string,
+	location: PlaceholderLocation,
+	fileName: string
+): boolean {
+	const adjacentContent = remoteXml.slice(location.endIndex).trimStart();
+	const names = [fileName, fileName.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+		.replace(/"/g, "&quot;").replace(/'/g, "&apos;")].map(escapeRegExp).join("|");
+	return new RegExp(`^<img\\b[^>]*\\bname=["'](?:${names})["'][^>]*(?:\\/>|>[\\s\\S]*?<\\/img>)`, "i")
 		.test(adjacentContent);
 }
 

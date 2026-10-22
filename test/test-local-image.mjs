@@ -161,9 +161,78 @@ try {
 		}
 	});
 	assert.deepEqual(inserted, [firstImage.placeholder, secondImage.placeholder]);
-	assert.deepEqual(moved, [["image-1", "first"], ["image-2", "second"]]);
+	assert.deepEqual(moved, [["image-1", "first"]], "a trailing placeholder is already followed by the appended image");
 	assert.deepEqual(deleted, ["first", "second"]);
 	assert.doesNotMatch(snapshot.content, /FEISHU_LARK_LOCAL_IMAGE_/);
+
+	// An image already placed behind its placeholder by an interrupted sync is reused, not uploaded twice.
+	const resumeXml = `<title id="title">Note</title><img id="done" name="root.png" src="x"/><p id="first">${firstImage.placeholder}</p><img id="uploaded" name="root.png" src="y"/>`;
+	let resumeState = resumeXml;
+	const resumeCalls = [];
+	const resumeSnapshot = await materializeLocalImages([firstImage], {
+		async fetchRemoteWithIds() { return { content: resumeState, revisionId: 1 }; },
+		async insertImage() { resumeCalls.push("insert"); return { blockId: "never" }; },
+		async moveBlockAfter() { resumeCalls.push("move"); },
+		async deleteBlock(blockId) {
+			resumeCalls.push(`delete ${blockId}`);
+			resumeState = resumeState.replace(new RegExp(`<p id="${blockId}">[^<]+</p>`), "");
+		}
+	});
+	assert.deepEqual(resumeCalls, ["delete first"]);
+	assert.equal(resumeSnapshot.content, `<title id="title">Note</title><img id="done" name="root.png" src="x"/><img id="uploaded" name="root.png" src="y"/>`);
+
+	// An image with another name behind the placeholder does not count as the uploaded one.
+	let otherState = `<p id="first">${firstImage.placeholder}</p><img id="other" name="other.png" src="z"/>`;
+	const otherCalls = [];
+	await materializeLocalImages([firstImage], {
+		async fetchRemoteWithIds() { return { content: otherState, revisionId: 1 }; },
+		async insertImage() {
+			otherCalls.push("insert");
+			otherState = otherState.replace("<img id=\"other\"", "<img id=\"new-image\" name=\"root.png\" src=\"n\"/><img id=\"other\"");
+			return { blockId: "new-image" };
+		},
+		async moveBlockAfter() { otherCalls.push("move"); },
+		async deleteBlock(blockId) {
+			otherCalls.push(`delete ${blockId}`);
+			otherState = otherState.replace(new RegExp(`<p id="${blockId}">[^<]+</p>`), "");
+		}
+	});
+	assert.deepEqual(otherCalls, ["insert", "move", "delete first"]);
+
+	// A copy of the placeholder left by an interrupted sync is cleaned up instead of failing the retry.
+	let strayXml = `<title id="title">Note</title><p id="first">${firstImage.placeholder}</p><p id="stray">${firstImage.placeholder}</p>`;
+	const strayDeleted = [];
+	const straySnapshot = await materializeLocalImages([firstImage], {
+		async fetchRemoteWithIds() {
+			return { content: strayXml, revisionId: 1 };
+		},
+		async insertImage() {
+			strayXml += `<img id="stray-image"/>`;
+			return { blockId: "stray-image" };
+		},
+		async moveBlockAfter(blockId, targetBlockId) {
+			strayXml = strayXml.replace(`<img id="${blockId}"/>`, "")
+				.replace(new RegExp(`(<p id="${targetBlockId}">[^<]+</p>)`), `$1<img id="${blockId}"/>`);
+		},
+		async deleteBlock(blockId) {
+			strayDeleted.push(blockId);
+			strayXml = strayXml.replace(new RegExp(`<p id="${blockId}">[^<]+</p>`), "");
+		}
+	});
+	assert.deepEqual(strayDeleted, ["first", "stray"]);
+	assert.doesNotMatch(straySnapshot.content, /FEISHU_LARK_LOCAL_IMAGE_/);
+	assert.match(straySnapshot.content, /<img id="stray-image"\/>/);
+
+	// A placeholder that cannot be removed still fails, without retrying forever.
+	let stuckDeletes = 0;
+	const stuckXml = `<p id="first">${firstImage.placeholder}</p><img id="stuck-image"/>`;
+	await assert.rejects(materializeLocalImages([firstImage], {
+		async fetchRemoteWithIds() { return { content: stuckXml, revisionId: 1 }; },
+		async insertImage() { return { blockId: "stuck-image" }; },
+		async moveBlockAfter() {},
+		async deleteBlock() { stuckDeletes += 1; }
+	}), /图片占位块删除后仍然存在/);
+	assert.equal(stuckDeletes, 6, "one normal delete plus a bounded number of stray cleanups");
 
 	let embeddedRemoteXml = `<checkbox id="task">验收交互<br/>${firstImage.placeholder}</checkbox><p id="next">下一项</p>`;
 	let embeddedRevisionId = 1;
