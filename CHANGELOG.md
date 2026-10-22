@@ -6,6 +6,8 @@
 
 ## [未发布]
 
+## [0.4.0] - 2026-10-22
+
 ### 新增
 
 - 「已发布文件」窗口里的同步提示更详细：说明正在同步什么，文件夹同步还会显示当前步骤（检查文件、读取笔记、创建飞书文档、上传 PDF、同步内容、整理目录页，以及有多少文件被 `.feishuignore` 忽略）。状态提示改成带色条和转圈的独立区域，不再和「共 N 项」混在一起；同步期间右上角会显示同样的进度通知，右键菜单的文件夹同步通知也会显示当前步骤。关闭窗口不会中断同步，失败时会在右上角提示。
@@ -77,6 +79,7 @@
 - 处理旧版 Wiki 文档的 owner 解析、标题附近的导入图片、飞书引用块和 URL 往返格式。
 - 完善目录发布、PDF 引用和 pre-push 同步中的去重与绑定恢复。
 
+[0.4.0]: https://github.com/totok22/feishu-docs-publisher/compare/0.3.1...0.4.0
 [0.3.1]: https://github.com/totok22/feishu-docs-publisher/compare/0.3.0...0.3.1
 [0.3.0]: https://github.com/totok22/feishu-docs-publisher/compare/0.2.1...0.3.0
 [0.2.1]: https://github.com/totok22/feishu-docs-publisher/compare/0.2.0...0.2.1

@@ -1,6 +1,6 @@
 {
 	"name": "feishu-docs-publisher",
-	"version": "0.3.1",
+	"version": "0.4.0",
 	"description": "Publish and sync Markdown notes, folders, and PDFs to Feishu/Lark Docs through the local lark-cli.",
 	"main": "main.js",
 	"type": "module",
