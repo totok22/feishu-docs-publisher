@@ -516,7 +516,7 @@ const MESSAGES = {
 		progressFolderFilesIgnored: "共 {count} 个文件待同步，{ignored} 个被 .feishuignore 忽略。",
 		progressFolderRead: "正在读取 {count} 篇笔记，并检查飞书上的目录…",
 		progressFolderDocs: "正在创建或匹配 {count} 篇笔记对应的飞书文档…",
-		progressFolderPdf: "正在上传 PDF {current}/{total}：{name}",
+		progressFolderPdf: "正在检查并同步 PDF {current}/{total}：{name}",
 		progressFolderContent: "正在同步 {count} 篇笔记的内容…",
 		progressFolderPages: "正在整理目录页…",
 		noticeDeletingMissingRemote: "正在删除本地已不存在的飞书文件...",
@@ -688,7 +688,7 @@ const MESSAGES = {
 		progressFolderFilesIgnored: "{count} files to sync, {ignored} ignored by .feishuignore.",
 		progressFolderRead: "Reading {count} notes and checking the folders in Feishu…",
 		progressFolderDocs: "Creating or matching Feishu documents for {count} notes…",
-		progressFolderPdf: "Uploading PDF {current}/{total}: {name}",
+		progressFolderPdf: "Checking and syncing PDF {current}/{total}: {name}",
 		progressFolderContent: "Syncing the content of {count} notes…",
 		progressFolderPages: "Updating folder pages…",
 		noticeDeletingMissingRemote: "Deleting Feishu/Lark files that no longer exist locally...",
@@ -868,6 +868,7 @@ export default class LarkCliSyncPlugin extends Plugin {
 	private larkCliActiveRequestCount = 0;
 	private lastLarkCliRequestAt = 0;
 	private operationQueue = new SyncQueue();
+	private folderResolutionQueue = new SyncQueue();
 	private ignoreRules = new IgnoreRules();
 	private settingsWriteQueue = new SyncQueue();
 	private hasUnsavedSettings = false;
@@ -4219,6 +4220,11 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		rootParent: RemoteParent,
 		folderPath: string
 	): Promise<RemoteFolderPathResolution> {
+		return await (this.folderResolutionQueue ??= new SyncQueue()).run(() => this.ensureRemoteFolderPathUnlocked(rootParent, folderPath));
+	}
+
+	private async ensureRemoteFolderPathUnlocked(rootParent: RemoteParent, folderPath: string): Promise<RemoteFolderPathResolution> {
+		if (this.hasUnsavedSettings) await this.saveSettingsWithoutClearingCommandCache();
 		const normalizedFolderPath = this.normalizeLinkPath(folderPath);
 		if (!normalizedFolderPath) {
 			return {
@@ -4240,6 +4246,16 @@ exec "${nodePath}" "${scriptPath}" "$@"
 					token: existingBinding.token,
 					kind: existingBinding.containerKind || parent.kind
 				};
+				continue;
+			}
+
+			const recoveredBinding = await this.findRemoteFolderBinding(parent, segments[index] || "Untitled", partialPath);
+			if (recoveredBinding) {
+				this.settings.folderBindings[bindingKey] = recoveredBinding;
+				delete this.settings.pendingFolderCreates?.[bindingKey];
+				await this.saveSettingsWithoutClearingCommandCache();
+				createdBinding = true;
+				parent = { token: recoveredBinding.token, kind: recoveredBinding.containerKind || parent.kind };
 				continue;
 			}
 
@@ -4266,6 +4282,35 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			parent,
 			createdBinding
 		};
+	}
+
+	private async findRemoteFolderBinding(parent: RemoteParent, name: string, path: string): Promise<BoundLarkDocument | null> {
+		if (parent.kind === "unknown") throw new LocalizedSyncError(this.settings.language === "en"
+			? "Use a Wiki or Drive folder URL as the upload target before syncing folders."
+			: "同步目录前，请将上传位置设置为 Wiki 或云盘文件夹链接。");
+		if (parent.kind === "wiki" || parent.kind === "my_library") {
+			// Wiki folder pages and ordinary notes both have type docx; a title cannot identify a folder.
+			const matches = (await this.listRemoteWikiNodes(parent)).filter((node) => node.title === name);
+			if (matches.length) throw new LocalizedSyncError(this.settings.language === "en"
+				? `A Wiki page already has the folder title ${path}. Set this folder's Feishu/Lark link before retrying.`
+				: `Wiki 中已有与目录“${path}”同名的页面。请先设置此目录的飞书链接，再重试。`);
+			return null;
+		}
+
+		const matches = (await this.listRemoteDocuments(parent, "folder")).filter((folder) => folder.title === name);
+		if (!matches.length) return null;
+		if (matches.length !== 1) throw new LocalizedSyncError(this.settings.language === "en"
+			? `Several remote folders match ${path} under the same parent. Set this folder's Feishu/Lark link before retrying.`
+			: `同一飞书父目录下有多个与“${path}”同名的文件夹。请先设置此目录的飞书链接，再重试。`);
+		const match = matches[0]!;
+		const aliases = this.getBindingAliases(match);
+		const bindings = [...Object.values(this.settings.folderBindings), ...this.getOtherRemoteBindings("").values()];
+		if (bindings.some((binding) => this.getBindingAliases(binding).some((alias) => aliases.includes(alias)))) {
+			throw new LocalizedSyncError(this.settings.language === "en"
+				? `The remote folder matching ${path} is already bound elsewhere. Set a different folder link before retrying.`
+				: `与“${path}”同名的飞书文件夹已绑定其他本地路径。请先设置不同的目录链接，再重试。`);
+		}
+		return { token: match.token, url: match.url, containerToken: parent.token, containerKind: "drive" };
 	}
 
 	private async createRemoteFolderPage(name: string, parent: RemoteParent): Promise<BoundLarkDocument> {
@@ -4380,6 +4425,13 @@ exec "${nodePath}" "${scriptPath}" "$@"
 				&& this.getFolderBindingPath(key) === this.normalizeLinkPath(folderPath);
 		});
 		if (existingKey) return existingKey;
+		// An uncertain create must also survive a change to the default target setting.
+		const pendingKey = Object.keys(this.settings.pendingFolderCreates || {}).find((key) => {
+			const root = this.getFolderBindingRootParent(key);
+			return root.kind === rootParent.kind && root.token === rootParent.token
+				&& this.getFolderBindingPath(key) === this.normalizeLinkPath(folderPath);
+		});
+		if (pendingKey) return pendingKey;
 		const target = this.settings.targetTokenOrUrl.trim() || "my_library";
 		return `${target}|${rootParent.kind}|${rootParent.token}|${this.normalizeLinkPath(folderPath)}`;
 	}
@@ -5734,7 +5786,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		return nodes;
 	}
 
-	private async listRemoteDocuments(parent: RemoteParent, objType: "docx" | "file" = "docx"): Promise<Array<BoundLarkDocument & { title: string }>> {
+	private async listRemoteDocuments(parent: RemoteParent, objType: "docx" | "file" | "folder" = "docx"): Promise<Array<BoundLarkDocument & { title: string }>> {
 		const documents: Array<BoundLarkDocument & { title: string }> = [];
 		const wiki = parent.kind === "wiki" || parent.kind === "my_library";
 		if (wiki) {
@@ -5754,7 +5806,10 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			const data = result.data;
 			if (!Array.isArray(data?.files)) throw new Error("Invalid Drive folder listing.");
 			for (const file of data.files) {
-				if (file.type === objType) documents.push({ title: file.name, token: file.token, url: file.url || "" });
+				if (file.type === objType) {
+					if (!file.token || typeof file.name !== "string") throw new Error("Invalid Drive file in folder listing.");
+					documents.push({ title: file.name, token: file.token, url: file.url || "" });
+				}
 			}
 			cursor = data?.has_more ? data.page_token || data.next_page_token || "" : "";
 			if (data?.has_more && (!cursor || seen.has(cursor))) throw new Error("Incomplete remote folder listing; binding recovery stopped.");

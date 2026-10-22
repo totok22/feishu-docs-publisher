@@ -964,10 +964,145 @@ assert.deepEqual(folderSequence, ["upload", "rewrite"], "new folder references r
 
 const uncertainFolderPlugin = createPublishingPlugin();
 let uncertainFolderCreates=0;
+uncertainFolderPlugin.listRemoteWikiNodes = async () => [];
 uncertainFolderPlugin.createRemoteFolderPage = async () => { uncertainFolderCreates++; throw new Error("folder create timeout"); };
 await assert.rejects(uncertainFolderPlugin.ensureRemoteFolderPath({kind:"my_library",token:""},"Root"),/folder create timeout/);
 await assert.rejects(uncertainFolderPlugin.ensureRemoteFolderPath({kind:"my_library",token:""},"Root"),/尚未确认/);
 assert.equal(uncertainFolderCreates,1);
+
+// Missing local directory records must not create a second remote directory.
+const driveRoot = { kind: "drive", token: "drive-root" };
+function folderCloudPlugin(children) {
+	const plugin = createPublishingPlugin();
+	const calls = [];
+	plugin.runLarkCli = async (args) => {
+		calls.push(args);
+		const parent = args[args.indexOf("--folder-token") + 1];
+		if (args[1] === "files" && args[2] === "list") {
+			return { ok: true, data: { files: children.get(parent) || [], has_more: false } };
+		}
+		if (args[1] === "+create-folder") {
+			const token = `created-${calls.length}`;
+			children.set(parent, [...(children.get(parent) || []), {
+				type: "folder", name: args[args.indexOf("--name") + 1], token
+			}]);
+			return { ok: true, data: { folder_token: token } };
+		}
+		throw new Error(`Unexpected folder command: ${args.join(" ")}`);
+	};
+	return { plugin, calls };
+}
+const oldFolder = { type: "folder", name: "原图资料", token: "original-folder", url: "https://example.feishu.cn/drive/folder/original-folder" };
+const recoveredCloud = new Map([[driveRoot.token, [oldFolder]]]);
+const { plugin: folderRecovery, calls: folderRecoveryCalls } = folderCloudPlugin(recoveredCloud);
+let recoveredSettings;
+folderRecovery.saveData = async (settings) => { recoveredSettings = structuredClone(settings); };
+const restoredDirectory = await folderRecovery.ensureRemoteFolderPath(driveRoot, "原图资料");
+assert.deepEqual(restoredDirectory, { parent: { kind: "drive", token: oldFolder.token }, createdBinding: true });
+assert.equal(folderRecoveryCalls.length, 1, "restoring a directory only lists remote files");
+assert.equal(recoveredCloud.get(driveRoot.token).length, 1);
+assert.equal(Object.values(recoveredSettings.folderBindings)[0].containerToken, driveRoot.token);
+const { plugin: restartedDirectory, calls: restartDirectoryCalls } = folderCloudPlugin(recoveredCloud);
+restartedDirectory.settings = recoveredSettings;
+restartedDirectory.settings.targetTokenOrUrl = "a different default target";
+await restartedDirectory.ensureRemoteFolderPath(driveRoot, "原图资料");
+assert.deepEqual(restartDirectoryCalls, [], "durable recovery survives restart and a changed default target");
+
+const nestedCloud = new Map([
+	[driveRoot.token, [oldFolder, { type: "docx", name: "Other", token: "ordinary-note" }]],
+	[oldFolder.token, [{ type: "folder", name: "Child", token: "child-folder" }]],
+	["unrelated-parent", [{ type: "folder", name: "New", token: "wrong-parent" }]]
+]);
+const { plugin: nestedRecovery, calls: nestedCalls } = folderCloudPlugin(nestedCloud);
+const nestedDirectory = await nestedRecovery.ensureRemoteFolderPath(driveRoot, "原图资料/Child/New");
+assert.equal(nestedDirectory.parent.kind, "drive");
+assert.notEqual(nestedDirectory.parent.token, "wrong-parent", "same names in another parent are never reused");
+assert.deepEqual(nestedCalls.map((args) => args[1]), ["files", "files", "files", "+create-folder"]);
+assert.equal(nestedCalls.at(-1)[nestedCalls.at(-1).indexOf("--folder-token") + 1], "child-folder");
+
+const { plugin: duplicateFolders, calls: duplicateFolderCalls } = folderCloudPlugin(new Map([
+	[driveRoot.token, [oldFolder, { ...oldFolder, token: "second-folder" }]]
+]));
+await assert.rejects(duplicateFolders.ensureRemoteFolderPath(driveRoot, "原图资料"), /多个.*同名/);
+assert.equal(duplicateFolderCalls.length, 1);
+assert.deepEqual(duplicateFolders.settings.folderBindings, {});
+assert.deepEqual(duplicateFolders.settings.pendingFolderCreates, {});
+
+for (const owner of ["folder", "document", "legacy"]) {
+	const { plugin: ownedFolder, calls } = folderCloudPlugin(new Map([[driveRoot.token, [oldFolder]]]));
+	if (owner === "folder") ownedFolder.settings.folderBindings["old|drive|other-root|Other"] = { token: oldFolder.token, url: "" };
+	if (owner === "document") ownedFolder.settings.documentBindings["Other.md"] = { token: oldFolder.token, url: "" };
+	if (owner === "legacy") {
+		ownedFolder.app.vault.getMarkdownFiles = () => [fakeNote];
+		ownedFolder.app.metadataCache.getFileCache = () => ({ frontmatter: { lark_doc_url: oldFolder.url } });
+	}
+	await assert.rejects(ownedFolder.ensureRemoteFolderPath(driveRoot, "原图资料"), /已绑定其他本地路径/);
+	assert.equal(calls.length, 1, "a remote folder bound elsewhere is neither reused nor duplicated");
+}
+
+const pendingKey = "old-default|drive|drive-root|原图资料";
+const { plugin: recoveredPending, calls: pendingCalls } = folderCloudPlugin(new Map([[driveRoot.token, [oldFolder]]]));
+recoveredPending.settings.pendingFolderCreates[pendingKey] = oldFolder.name;
+recoveredPending.settings.targetTokenOrUrl = "new-default";
+await recoveredPending.ensureRemoteFolderPath(driveRoot, "原图资料");
+assert.equal(recoveredPending.settings.folderBindings[pendingKey].token, oldFolder.token);
+assert.deepEqual(recoveredPending.settings.pendingFolderCreates, {});
+assert.equal(pendingCalls.length, 1, "a timed-out Drive create can recover its unique remote folder");
+const { plugin: unresolvedPending, calls: unresolvedCalls } = folderCloudPlugin(new Map());
+unresolvedPending.settings.pendingFolderCreates[pendingKey] = oldFolder.name;
+unresolvedPending.settings.targetTokenOrUrl = "new-default";
+await assert.rejects(unresolvedPending.ensureRemoteFolderPath(driveRoot, "原图资料"), /尚未确认/);
+assert.equal(unresolvedCalls.length, 1, "changing the default must not bypass an uncertain create");
+assert.ok(unresolvedPending.settings.pendingFolderCreates[pendingKey]);
+
+const { plugin: failedRecovery } = folderCloudPlugin(new Map([[driveRoot.token, [oldFolder]]]));
+failedRecovery.saveData = async () => { throw new Error("recovery disk full"); };
+await assert.rejects(failedRecovery.ensureRemoteFolderPath(driveRoot, "原图资料"), /recovery disk full/);
+await assert.rejects(failedRecovery.ensureRemoteFolderPath(driveRoot, "原图资料"), /recovery disk full/);
+assert.equal(failedRecovery.hasUnsavedSettings, true, "unsaved recovery must not report success on retry");
+
+const { plugin: concurrentDirectory, calls: concurrentDirectoryCalls } = folderCloudPlugin(new Map());
+const concurrentDirectories = await Promise.all([
+	concurrentDirectory.ensureRemoteFolderPath(driveRoot, "New"),
+	concurrentDirectory.ensureRemoteFolderPath(driveRoot, "New")
+]);
+assert.deepEqual(concurrentDirectories[0].parent, concurrentDirectories[1].parent);
+assert.equal(concurrentDirectoryCalls.filter((args) => args[1] === "+create-folder").length, 1);
+
+// Inspect every page before accepting a name match; listing failures never permit creation.
+for (const listingCase of ["later-match", "later-duplicate", "missing-cursor", "repeated-cursor", "permission", "malformed", "invalid-token"]) {
+	const plugin = createPublishingPlugin();
+	const calls = [];
+	plugin.runLarkCli = async (args) => {
+		calls.push(args);
+		assert.equal(args[1], "files", "unsafe listings must not fall through to creation");
+		if (listingCase === "permission") throw new Error("permission denied");
+		if (listingCase === "malformed") return { ok: true, data: {} };
+		if (listingCase === "invalid-token") return { ok: true, data: { files: [{ type: "folder", name: oldFolder.name }] } };
+		const secondPage = args.includes("--page-token");
+		return { ok: true, data: {
+			files: listingCase === "later-duplicate" || secondPage ? [{ ...oldFolder, token: secondPage ? "later-folder" : oldFolder.token }] : [],
+			has_more: !secondPage || listingCase === "repeated-cursor",
+			page_token: listingCase === "missing-cursor" ? "" : "next-page"
+		} };
+	};
+	if (listingCase === "later-match") {
+		assert.equal((await plugin.ensureRemoteFolderPath(driveRoot, oldFolder.name)).parent.token, "later-folder");
+		assert.equal(calls.length, 2);
+	} else {
+		await assert.rejects(plugin.ensureRemoteFolderPath(driveRoot, oldFolder.name), /多个|Incomplete|permission|Invalid/);
+		assert.deepEqual(plugin.settings.folderBindings, {});
+		assert.deepEqual(plugin.settings.pendingFolderCreates, {});
+	}
+}
+
+const wikiTitleConflict = createPublishingPlugin();
+wikiTitleConflict.listRemoteWikiNodes = async () => [{ title: "Root", obj_type: "docx", node_token: "ordinary-page", obj_token: "ordinary-doc" }];
+wikiTitleConflict.createRemoteFolderPage = async () => { throw new Error("must not create on a Wiki title conflict"); };
+await assert.rejects(wikiTitleConflict.ensureRemoteFolderPath({ kind: "wiki", token: "wiki-root" }, "Root"), /同名的页面/);
+const unknownFolderParent = createPublishingPlugin();
+await assert.rejects(unknownFolderParent.ensureRemoteFolderPath({ kind: "unknown", token: "raw-token" }, "Root"), /文件夹链接/);
+assert.match(folderRecovery.t("progressFolderPdf", { current: "1", total: "2", name: "test.pdf" }), /检查并同步 PDF 1\/2/);
 
 // Native lists are inserted without rebuilding the parent page or managing links.
 const pageListPlugin = createPublishingPlugin();
