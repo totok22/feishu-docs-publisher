@@ -4,7 +4,7 @@
 
 本文件按 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的结构维护，版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
-## [未发布]
+## [0.4.2] - 2026-10-24
 
 ### 新增
 
@@ -107,6 +107,7 @@
 - 处理旧版 Wiki 文档的 owner 解析、标题附近的导入图片、飞书引用块和 URL 往返格式。
 - 完善目录发布、PDF 引用和 pre-push 同步中的去重与绑定恢复。
 
+[0.4.2]: https://github.com/totok22/feishu-docs-publisher/compare/0.4.1...0.4.2
 [0.4.1]: https://github.com/totok22/feishu-docs-publisher/compare/0.4.0...0.4.1
 [0.4.0]: https://github.com/totok22/feishu-docs-publisher/compare/0.3.1...0.4.0
 [0.3.1]: https://github.com/totok22/feishu-docs-publisher/compare/0.3.0...0.3.1
