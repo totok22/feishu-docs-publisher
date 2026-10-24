@@ -42,6 +42,7 @@ await esbuild.build({
 					export class Setting {}
 					export class TFile {}
 					globalThis.__TFileClass = TFile;
+					globalThis.__TFolderClass = TFolder;
 				`
 			}));
 		}
@@ -49,6 +50,9 @@ await esbuild.build({
 });
 
 const { default: LarkCliSyncPlugin } = await import("./.tmp-main-test.mjs");
+const TestFile = globalThis.__TFileClass;
+const TestFolder = globalThis.__TFolderClass;
+delete globalThis.__TFolderClass;
 
 function createPlugin() {
 	const plugin = Object.create(LarkCliSyncPlugin.prototype);
@@ -67,6 +71,34 @@ function createPlugin() {
 	};
 	plugin.saveData = async () => {};
 	return plugin;
+}
+
+function installVaultTree(vault) {
+	const buildTree = () => {
+		const root = Object.assign(new TestFolder(), { path: "/", children: [] });
+		const nodes = new Map([["", root], ["/", root]]);
+		const files = new Map([...(vault.getFiles?.() || []), ...(vault.getMarkdownFiles?.() || [])]
+			.map((file) => [file.path, file]));
+		for (const file of files.values()) {
+			const parts = file.path.split("/");
+			let parent = root;
+			for (let depth = 1; depth < parts.length; depth++) {
+				const path = parts.slice(0, depth).join("/");
+				if (!nodes.has(path)) {
+					const folder = Object.assign(new TestFolder(), { path, children: [] });
+					nodes.set(path, folder);
+					parent.children.push(folder);
+				}
+				parent = nodes.get(path);
+			}
+			const node = Object.assign(new TestFile(), file);
+			nodes.set(file.path, node);
+			parent.children.push(node);
+		}
+		return nodes;
+	};
+	vault.getAbstractFileByPath = (path) => buildTree().get(path) || null;
+	vault.getRoot = () => buildTree().get("/");
 }
 
 const policyPlugin = createPlugin();
@@ -626,6 +658,7 @@ function createPublishingPlugin() {
 			read: async () => "# Note\n\nBody" },
 		fileManager: { processFrontMatter: async () => { throw new Error("Unexpected frontmatter write"); } }
 	};
+	installVaultTree(plugin.app.vault);
 	plugin.readNoteForLark = async () => ({ content: "# Note\n\nBody", images: [] });
 	plugin.resolvePublishedFolderParentForFile = async () => null;
 	plugin.resolveRemoteRootParent = async () => ({ kind: "my_library", token: "" });
@@ -634,6 +667,57 @@ function createPublishingPlugin() {
 	plugin.saveCreatedDocumentStateFromBaseline = async () => {};
 	return plugin;
 }
+
+// Folder collection must stay in the selected subtree, without a global vault listing.
+const scopedPlugin = createPublishingPlugin();
+const scopedNote = Object.assign(new TestFile(), { path: "Root/Note.md", extension: "md" });
+const nestedNote = Object.assign(new TestFile(), { path: "Root/Sub/Deep.md", extension: "md" });
+const scopedPdf = Object.assign(new TestFile(), { path: "Root/Sub/Scan.pdf", extension: "pdf" });
+const outsideNote = Object.assign(new TestFile(), { path: "Root-other/Private.md", extension: "md" });
+const subFolder = Object.assign(new TestFolder(), { path: "Root/Sub", children: [scopedPdf, nestedNote] });
+const selectedFolder = Object.assign(new TestFolder(), { path: "Root", children: [scopedNote, subFolder] });
+let outsideVisits = 0;
+const outsideFolder = Object.assign(new TestFolder(), { path: "Root-other" });
+Object.defineProperty(outsideFolder, "children", { get: () => { outsideVisits++; return [outsideNote]; } });
+const vaultRoot = Object.assign(new TestFolder(), { path: "/", children: [selectedFolder, outsideFolder] });
+const scopedNodes = new Map([["Root", selectedFolder], ["Root/Sub", subFolder], ["Root/Note.md", scopedNote], ["/", vaultRoot]]);
+scopedPlugin.app.vault = {
+	getAbstractFileByPath: (path) => scopedNodes.get(path) || null,
+	getRoot: () => vaultRoot,
+	getFiles: () => assert.fail("Folder collection must not enumerate the vault"),
+	getMarkdownFiles: () => assert.fail("Folder collection must not enumerate all Markdown")
+};
+assert.deepEqual(scopedPlugin.collectFolderFiles("Root").map((file) => file.path).sort(),
+	["Root/Note.md", "Root/Sub/Deep.md", "Root/Sub/Scan.pdf"]);
+assert.deepEqual(scopedPlugin.collectMarkdownFiles("Root").map((file) => file.path), ["Root/Note.md", "Root/Sub/Deep.md"]);
+assert.deepEqual(scopedPlugin.collectFolderFiles("Missing"), []);
+assert.deepEqual(scopedPlugin.collectFolderFiles("Root/Note.md"), []);
+assert.equal(outsideVisits, 0, "sibling folders are never visited");
+assert.equal(scopedPlugin.collectFolderFiles("").length, 4, "the vault root can still be selected explicitly");
+assert.equal(scopedPlugin.collectFolderFiles("/").length, 4);
+
+// Image changes read only bound notes through Obsidian, including legacy frontmatter bindings.
+const referencePlugin = createPublishingPlugin();
+const referenceNotes = ["Linked.md", "Unrelated.md", "Unbound.md", "Disconnected.md", "Legacy.md", "Missing.md"]
+	.map((path) => ({ path, extension: "md" }));
+referencePlugin.settings.documentBindings = Object.fromEntries(["Linked.md", "Unrelated.md", "Disconnected.md", "Missing.md"]
+	.map((path) => [path, { token: path, url: "" }]));
+referencePlugin.settings.disconnectedBindings = { "Disconnected.md": true };
+referencePlugin.app.metadataCache.getFileCache = (file) => file.path === "Legacy.md"
+	? { frontmatter: { lark_doc_url: "https://example.feishu.cn/docx/legacy" } } : null;
+referencePlugin.app.vault.getMarkdownFiles = () => referenceNotes;
+const referenceReads = [], referenceQueued = [];
+referencePlugin.app.vault.read = async (file) => {
+	referenceReads.push(file.path);
+	if (file.path === "Missing.md") throw new Error("File was deleted");
+	return file.path === "Unrelated.md" ? "![[other.png]]" : "![[photo.png]]";
+};
+referencePlugin.getVaultRoot = () => "/nonexistent-reference-test-vault";
+referencePlugin.queueSaveAutoSync = (file) => referenceQueued.push(file.path);
+await referencePlugin.queueImageReferenceAutoSync(["photo.png"]);
+assert.deepEqual(referenceReads, ["Linked.md", "Unrelated.md", "Legacy.md", "Missing.md"]);
+assert.deepEqual(referenceQueued, ["Legacy.md", "Linked.md"]);
+
 const publishOptions = { allowCreate: true, openAfterSync: false, showSuccess: false,
 	showRemoteDeletedNotice: false, updateFrontmatter: false, mode: "manual" };
 const fakeNote = { path: "docs/Note.md", basename: "Note", name: "Note.md", extension: "md" };
@@ -1822,6 +1906,7 @@ try {
 			create: async (path, content) => { writes.push({ kind: "create", path }); contents.set(path, content); },
 			modify: async (file, content) => { writes.push({ kind: "modify", path: file.path }); contents.set(file.path, content); }
 		};
+		installVaultTree(plugin.app.vault);
 		return plugin;
 	};
 

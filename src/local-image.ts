@@ -50,6 +50,7 @@ export interface FindReferencingMarkdownInput {
 	vaultRoot: string;
 	markdownPaths: string[];
 	changedImagePaths: string[];
+	readMarkdown?: (path: string) => Promise<string>;
 }
 
 export class LocalImageError extends Error {
@@ -67,8 +68,23 @@ export class LocalImageError extends Error {
 
 export async function buildLocalImageFileIndex(vaultRoot: string): Promise<LocalImageFileIndex> {
 	const paths = new Set<string>();
+	await collectImageFiles(vaultRoot, vaultRoot, paths);
+	return buildLocalImageFileIndexFromPaths(paths);
+}
+
+export function buildLocalImageFileIndexFromPaths(filePaths: Iterable<string>): LocalImageFileIndex {
+	const paths = new Set<string>();
 	const pathsByBasename = new Map<string, string[]>();
-	await collectImageFiles(vaultRoot, vaultRoot, paths, pathsByBasename);
+	for (const filePath of filePaths) {
+		if (!isSupportedImagePath(filePath)) continue;
+		const path = normalizeVaultPath(filePath);
+		if (paths.has(path)) continue;
+		paths.add(path);
+		const fileName = basename(path);
+		const matches = pathsByBasename.get(fileName) || [];
+		matches.push(path);
+		pathsByBasename.set(fileName, matches);
+	}
 	return { paths, pathsByBasename };
 }
 
@@ -147,10 +163,11 @@ export async function findReferencingMarkdownFiles(input: FindReferencingMarkdow
 	const changedBasenames = new Set(Array.from(changedPaths, (path) => basename(path)));
 	const referencing = new Set<string>();
 	for (const markdownPath of input.markdownPaths) {
-		const absoluteMarkdownPath = resolve(input.vaultRoot, markdownPath);
 		let content: string;
 		try {
-			content = await readFile(absoluteMarkdownPath, "utf8");
+			content = input.readMarkdown
+				? await input.readMarkdown(markdownPath)
+				: await readFile(resolve(input.vaultRoot, markdownPath), "utf8");
 		} catch {
 			continue;
 		}
@@ -391,8 +408,7 @@ function replaceImageReferences(
 async function collectImageFiles(
 	vaultRoot: string,
 	directory: string,
-	paths: Set<string>,
-	pathsByBasename: Map<string, string[]>
+	paths: Set<string>
 ): Promise<void> {
 	const entries = await readdir(directory, { withFileTypes: true });
 	for (const entry of entries) {
@@ -401,7 +417,7 @@ async function collectImageFiles(
 		}
 		const absolutePath = join(directory, entry.name);
 		if (entry.isDirectory()) {
-			await collectImageFiles(vaultRoot, absolutePath, paths, pathsByBasename);
+			await collectImageFiles(vaultRoot, absolutePath, paths);
 			continue;
 		}
 		if (!entry.isFile() || !isSupportedImagePath(entry.name)) {
@@ -409,10 +425,6 @@ async function collectImageFiles(
 		}
 		const vaultPath = normalizeVaultPath(relative(vaultRoot, absolutePath));
 		paths.add(vaultPath);
-		const fileName = basename(vaultPath);
-		const matches = pathsByBasename.get(fileName) || [];
-		matches.push(vaultPath);
-		pathsByBasename.set(fileName, matches);
 	}
 }
 

@@ -31,7 +31,7 @@ class ConfirmDeletionModal extends Modal {
 		const list = this.contentEl.createEl("ul", { cls: "feishu-lark-delete-list" });
 		for (const line of this.lines) list.createEl("li", { text: line });
 		new Setting(this.contentEl)
-			.addButton((button) => button.setButtonText(this.labels.confirm).setWarning().onClick(() => this.finish(true)))
+			.addButton((button) => button.setButtonText(this.labels.confirm).setDestructive().onClick(() => this.finish(true)))
 			.addButton((button) => button.setButtonText(this.labels.cancel).onClick(() => this.finish(false)));
 	}
 

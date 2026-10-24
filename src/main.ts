@@ -118,11 +118,12 @@ import {
 	EMBEDDED_PRE_PUSH_SCRIPT
 } from "./embedded-helpers";
 import {
-	buildLocalImageFileIndex,
+	buildLocalImageFileIndexFromPaths,
 	collectReferencedLocalImagePaths,
 	containsLocalImagePlaceholders,
 	findReferencingMarkdownFiles,
 	isSupportedImagePath,
+	LocalImageFileIndex,
 	LocalImageResource,
 	prepareLocalImages,
 	scanLocalImageReferences
@@ -1096,14 +1097,18 @@ export default class LarkCliSyncPlugin extends Plugin {
 	}
 
 	private async queueImageReferenceAutoSync(changedImagePaths: string[]): Promise<void> {
-		const markdownFiles = this.app.vault.getMarkdownFiles();
-		const markdownPaths = markdownFiles.map((file) => file.path);
+		const markdownFiles = this.app.vault.getMarkdownFiles().filter((file) => this.getBinding(file));
+		const filesByPath = new Map(markdownFiles.map((file) => [file.path, file]));
 		const referencingPaths = await findReferencingMarkdownFiles({
 			vaultRoot: this.getVaultRoot(),
-			markdownPaths,
-			changedImagePaths
+			markdownPaths: [...filesByPath.keys()],
+			changedImagePaths,
+			readMarkdown: (path) => {
+				const file = filesByPath.get(path);
+				if (!file) throw new Error(`Markdown file not found: ${path}`);
+				return this.app.vault.read(file);
+			}
 		});
-		const filesByPath = new Map(markdownFiles.map((file) => [file.path, file]));
 		for (const markdownPath of referencingPaths) {
 			const file = filesByPath.get(markdownPath);
 			if (file && this.getBinding(file)) {
@@ -2407,12 +2412,11 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			onProgress?.(this.t("progressFolderScan"));
 			if (this.hasUnsavedSettings) await this.saveSettingsWithoutClearingCommandCache();
 			const reconnected = clearDisconnectedFolderPaths(this.settings.disconnectedFolders ??= {}, folderPath);
-			await this.refreshIgnoreRules([`${folderPath}/`, ...this.app.vault.getFiles()
-				.filter((file) => this.isPathWithin(file.path, folderPath)).map((file) => file.path)]);
+			await this.refreshIgnoreRules([`${folderPath}/`, ...this.collectFolderFiles(folderPath).map((file) => file.path)]);
 			const createdGalleries = await this.ensureImageGalleryNotes(folderPath);
 			const notes = this.collectMarkdownFiles(folderPath).filter((file) => !this.isFolderDisconnected(file.path));
-			const pdfs = this.app.vault.getFiles().filter((file) => file.extension.toLowerCase() === "pdf"
-				&& this.isPathWithin(file.path, folderPath) && !this.isFolderDisconnected(file.path));
+			const pdfs = this.collectFolderFiles(folderPath).filter((file) => file.extension.toLowerCase() === "pdf"
+				&& !this.isFolderDisconnected(file.path));
 			const files = notes.filter((file) => !this.isSyncIgnored(file.path));
 			const pdfFiles = pdfs.filter((file) => !this.isSyncIgnored(file.path));
 			const ignoredCount = notes.length + pdfs.length - files.length - pdfFiles.length;
@@ -2506,8 +2510,8 @@ exec "${nodePath}" "${scriptPath}" "$@"
 	 * note per folder. Images already embedded by a hand-written note are left alone.
 	 */
 	private async ensureImageGalleryNotes(folderPath: string): Promise<number> {
-		const images = this.app.vault.getFiles().filter((file) => isSupportedImagePath(file.path)
-			&& this.isPathWithin(file.path, folderPath) && !this.isFolderDisconnected(file.path)
+		const images = this.collectFolderFiles(folderPath).filter((file) => isSupportedImagePath(file.path)
+			&& !this.isFolderDisconnected(file.path)
 			&& !this.isSyncIgnored(file.path));
 		// Ignored notes stay in the list: they still occupy their paths and still embed images that must not be re-collected.
 		const notes = await Promise.all(this.collectMarkdownFiles(folderPath)
@@ -2519,7 +2523,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			referencedImagePaths: images.length === 0 ? new Set<string>() : collectReferencedLocalImagePaths(
 				notes.filter(({ content }) => !isImageGalleryContent(content))
 					.map(({ file, content }) => ({ path: file.path, content })),
-				await buildLocalImageFileIndex(this.getVaultRoot())
+				this.buildVaultImageIndex()
 			),
 			noteName: (folderName) => this.t("imageGalleryNoteName", { name: folderName || this.app.vault.getName() })
 		});
@@ -2841,10 +2845,30 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		return null;
 	}
 
+	private collectFolderFiles(folderPath: string): TFile[] {
+		const folder = folderPath ? this.app.vault.getAbstractFileByPath(folderPath) : this.app.vault.getRoot();
+		if (!(folder instanceof TFolder)) return [];
+		const files: TFile[] = [];
+		const pending = [folder];
+		while (pending.length) {
+			const current = pending.pop();
+			if (!current) continue;
+			for (const child of current.children) {
+				if (child instanceof TFolder) pending.push(child);
+				else if (child instanceof TFile) files.push(child);
+			}
+		}
+		return files;
+	}
+
 	private collectMarkdownFiles(folderPath: string): TFile[] {
-		return this.app.vault.getMarkdownFiles()
-			.filter((file) => this.isPathWithin(file.path, folderPath))
+		return this.collectFolderFiles(folderPath)
+			.filter((file) => file.extension === "md")
 			.sort((a, b) => a.path.localeCompare(b.path));
+	}
+
+	private buildVaultImageIndex(): LocalImageFileIndex {
+		return buildLocalImageFileIndexFromPaths(this.app.vault.getFiles().map((file) => file.path));
 	}
 
 	private async readNoteForLark(file: TFile): Promise<PreparedNoteContent> {
@@ -2858,7 +2882,8 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		return await prepareLocalImages({
 			vaultRoot: this.getVaultRoot(),
 			markdownPath: file.path,
-			content
+			content,
+			imageIndex: this.buildVaultImageIndex()
 		});
 	}
 
@@ -5431,8 +5456,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 	}
 
 	private hasIgnoredContent(folderPath: string): boolean {
-		return this.app.vault.getFiles().some((file) => this.isPathWithin(file.path, folderPath)
-			&& this.isSyncIgnored(file.path) && !this.isFolderDisconnected(file.path)
+		return this.collectFolderFiles(folderPath).some((file) => this.isSyncIgnored(file.path) && !this.isFolderDisconnected(file.path)
 			&& (file.extension.toLowerCase() === "md" || file.extension.toLowerCase() === "pdf"));
 	}
 

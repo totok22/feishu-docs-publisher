@@ -19,7 +19,7 @@ const {
 	replaceImageGalleryBody,
 	stripImageGalleryMarker
 } = await import("./.tmp-image-gallery-test.mjs");
-const { buildLocalImageFileIndex, collectReferencedLocalImagePaths } = await import("./.tmp-image-gallery-local-image-test.mjs");
+const { buildLocalImageFileIndex, buildLocalImageFileIndexFromPaths, collectReferencedLocalImagePaths } = await import("./.tmp-image-gallery-local-image-test.mjs");
 
 const noteName = (folderName) => `${folderName} images`;
 const plan = (input) => planImageGalleries({ referencedImagePaths: new Set(), noteName, ...input });
@@ -94,6 +94,14 @@ try {
 		await writeFile(join(workspace, path), "x");
 	}
 	const index = await buildLocalImageFileIndex(workspace);
+	const vaultIndex = buildLocalImageFileIndexFromPaths([
+		"Notes/attachments/a.png", "Notes/b.png", "Shots/c.png", "Shots/d.png",
+		"Notes/b.png", "Notes/readme.md", "Shots/../Shots/c.png"
+	]);
+	assert.deepEqual(vaultIndex, index, "a Vault path index resolves the same images without scanning disk");
+	const duplicates = buildLocalImageFileIndexFromPaths(["Notes/a.png", "Shots/a.png"]);
+	assert.deepEqual(duplicates.pathsByBasename.get("a.png"), ["Notes/a.png", "Shots/a.png"],
+		"same-named images in different folders remain ambiguous");
 	const referenced = collectReferencedLocalImagePaths([
 		{ path: "Notes/readme.md", content: "![[a.png]]\n\n![x](b.png)\n\n![[missing.png]]\n\n```\n![[Shots/d.png]]\n```" },
 		{ path: "Other.md", content: "![[Shots/c.png|300]]" }

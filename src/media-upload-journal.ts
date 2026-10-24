@@ -22,9 +22,11 @@ export function createMediaUploadJournal(directory: string, doc: string): MediaU
 				if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
 				throw error;
 			}
-			const record = JSON.parse(raw);
-			if (record?.doc !== doc || record?.placeholder !== image.placeholder
-				|| typeof record?.blockId !== "string" || !record.blockId.trim()) {
+			const record: unknown = JSON.parse(raw);
+			if (typeof record !== "object" || record === null
+				|| !("doc" in record) || record.doc !== doc
+				|| !("placeholder" in record) || record.placeholder !== image.placeholder
+				|| !("blockId" in record) || typeof record.blockId !== "string" || !record.blockId.trim()) {
 				throw new Error(`Invalid image upload record: ${image.vaultPath}`);
 			}
 			return record.blockId;
