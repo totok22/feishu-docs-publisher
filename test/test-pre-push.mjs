@@ -91,6 +91,7 @@ async function run() {
 		await testWindowsSystemNotificationOnFailure(workspace);
 		await testImageOnlyChangeSyncsReferencingDocument(workspace);
 		await testImageOnlyChangeSyncsReferencingDocument(workspace, true);
+		await testVideoOnlyChangeFindsReferencingDocument(workspace);
 		await testRecordedMediaUploadResumes(workspace);
 		await testLegacyPluginDataFallback(workspace);
 		await testCurrentPluginDataPrecedesLegacy(workspace);
@@ -1444,6 +1445,41 @@ async function testImageOnlyChangeSyncsReferencingDocument(workspace, persistedB
 	const remoteState = JSON.parse(await readFile(mediaStatePath(workspace), "utf8"));
 	assert.match(remoteState.content, /<img id="uploaded-image"\/>/);
 	assert.doesNotMatch(remoteState.content, /FEISHU_LARK_LOCAL_IMAGE_/);
+}
+
+async function testVideoOnlyChangeFindsReferencingDocument(workspace) {
+	for (const extension of ["mp4", "m4v", "MOV", "webm"]) {
+		await resetWorkspaceFiles(workspace);
+		const videoName = `demo.${extension}`;
+		const body = `Body\n\n![[${videoName}]]`;
+		await writeFile(join(workspace, videoName), "video baseline");
+		await writeFile(join(workspace, "bound.md"), boundMarkdown("https://example.feishu.cn/docx/doc-token", body));
+		await execFileAsync("git", ["add", "bound.md", videoName], { cwd: workspace });
+		await execFileAsync("git", ["commit", "-m", "video baseline"], { cwd: workspace });
+		const remoteHead = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: workspace })).stdout.trim();
+		await writeFile(join(workspace, videoName), "video changed");
+		await execFileAsync("git", ["add", videoName], { cwd: workspace });
+		await execFileAsync("git", ["commit", "-m", "video changed"], { cwd: workspace });
+		const localHead = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: workspace })).stdout.trim();
+
+		// Simulate a save-triggered sync that already published this version. The hook
+		// still needs to find the note from a video-only Git change, then skip uploading it again.
+		const prepared = await prepareLocalImages({ vaultRoot: workspace, markdownPath: "bound.md", content: `# bound\n\n${body}` });
+		const remoteXml = '<title id="doc-title">bound</title><p id="blk-1">Body</p>'
+			+ '<figure id="video" view-type="Preview"><source id="source" mime="video/mp4"/></figure>';
+		await writeSyncStateRaw(workspace, { version: 1, documents: {
+			"doc-token": await createDocumentSyncStateFromRemote("doc-token", prepared.content, remoteXml, 4)
+		} });
+		await writeSettings(workspace, { autoSyncMode: "pre-push", syncStrategy: "precise", language: "en" });
+		await clearLog(workspace);
+		await writeFile(mediaStatePath(workspace), JSON.stringify({ content: remoteXml, revisionId: 4 }));
+		const refs = `refs/heads/main ${localHead} refs/heads/main ${remoteHead}\n`;
+		const result = await spawnHook(workspace, refs, { LARK_CLI_MEDIA_FLOW: "1" });
+		assert.equal(result.exitCode, 0, result.stderr);
+		const log = await readLog(workspace);
+		assert.match(log, /docs \+fetch .*--doc \S*doc-token/, `${extension}-only changes must select their referencing note`);
+		assert.doesNotMatch(log, /docs \+update|\+media-insert/, "already synced videos must not upload again");
+	}
 }
 
 async function testRecordedMediaUploadResumes(workspace) {

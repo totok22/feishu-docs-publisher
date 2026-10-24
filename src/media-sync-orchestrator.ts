@@ -36,6 +36,7 @@ export async function materializeLocalImages(
 
 	let snapshot = await host.fetchRemoteWithIds();
 	for (const image of images) {
+		const mediaLabel = image.mediaType === "video" ? "视频" : "图片";
 		const location = findPlaceholderLocation(snapshot.content, image.placeholder);
 		if (!location) {
 			await host.uploadJournal?.clear(image);
@@ -43,37 +44,46 @@ export async function materializeLocalImages(
 		}
 
 		// Only a recorded block id proves which upload belongs to this placeholder.
-		// Names alone cannot distinguish different images or repeated embeds.
-		let blockId = await host.uploadJournal?.load(image);
-		if (!blockId || !hasImageBlock(snapshot.content, blockId)) {
-			// selection-with-ellipsis 会让飞书重建整篇文档的 block。先追加再移动，只影响新增图片和锚点。
+		// Names alone cannot distinguish different media files or repeated embeds.
+		const recordedBlockId = await host.uploadJournal?.load(image);
+		let blockId = recordedBlockId ? resolveInsertedBlockId(snapshot.content, recordedBlockId, image) : null;
+		if (recordedBlockId && !blockId && image.mediaType === "video"
+			&& hasVideoUploadBlock(snapshot.content, recordedBlockId)) {
+			throw new Error(`视频上传后未返回可播放的预览块：${image.vaultPath}`);
+		}
+		if (!blockId) {
+			// selection-with-ellipsis 会让飞书重建整篇文档的 block。先追加再移动，只影响新增媒体和锚点。
 			const insertedMedia = await host.insertImage(image);
-			blockId = insertedMedia.blockId;
 			// Save before moving: either operation can be interrupted independently.
-			await host.uploadJournal?.save(image, blockId);
+			await host.uploadJournal?.save(image, insertedMedia.blockId);
 			snapshot = await host.fetchRemoteWithIds();
+			blockId = image.mediaType === "video"
+				? resolveInsertedBlockId(snapshot.content, insertedMedia.blockId, image)
+				: insertedMedia.blockId;
+			if (!blockId) throw new Error(`视频上传后未返回可播放的预览块：${image.vaultPath}`);
+			if (blockId !== insertedMedia.blockId) await host.uploadJournal?.save(image, blockId);
 		}
 		let placedLocation = findPlaceholderLocation(snapshot.content, image.placeholder);
-		if (!placedLocation) throw new Error(`图片上传后占位块不存在：${image.vaultPath}`);
+		if (!placedLocation) throw new Error(`${mediaLabel}上传后占位块不存在：${image.vaultPath}`);
 		// Avoid Feishu's no-op move error, including after a recovered upload.
-		if (!hasImageAfter(snapshot.content, placedLocation, blockId)) {
+		if (!hasMediaAfter(snapshot.content, placedLocation, blockId, image)) {
 			await host.moveBlockAfter(blockId, placedLocation.blockId);
 			snapshot = await host.fetchRemoteWithIds();
 			placedLocation = findPlaceholderLocation(snapshot.content, image.placeholder);
 		}
-		if (!placedLocation || !hasImageAfter(snapshot.content, placedLocation, blockId)) {
-			throw new Error(`图片上传后未出现在预期位置：${image.vaultPath}`);
+		if (!placedLocation || !hasMediaAfter(snapshot.content, placedLocation, blockId, image)) {
+			throw new Error(`${mediaLabel}上传后未出现在预期位置：${image.vaultPath}`);
 		}
 
 		await removePlaceholder(host, placedLocation, image.placeholder, snapshot.revisionId);
 		snapshot = await host.fetchRemoteWithIds();
 
-		// An interrupted earlier sync can leave copies of the same placeholder behind. The image
+		// An interrupted earlier sync can leave copies of the same placeholder behind. The media
 		// is already in place, so drop every remaining copy instead of failing on each retry.
 		for (let strays = 0; snapshot.content.includes(image.placeholder); strays += 1) {
 			const stray = findPlaceholderLocation(snapshot.content, image.placeholder);
 			if (!stray || strays >= MAX_STRAY_PLACEHOLDERS) {
-				throw new Error(`图片占位块删除后仍然存在：${image.vaultPath}`);
+				throw new Error(`${mediaLabel}占位块删除后仍然存在：${image.vaultPath}`);
 			}
 			await removePlaceholder(host, stray, image.placeholder, snapshot.revisionId);
 			snapshot = await host.fetchRemoteWithIds();
@@ -110,15 +120,18 @@ export function buildMediaInsertArgs(
 		"--file",
 		`./${basename(image.absolutePath)}`,
 		"--type",
-		"image"
+		image.mediaType === "video" ? "file" : "image"
 	];
-	if (image.displayWidth) {
+	if (image.mediaType === "video") {
+		args.push("--file-view", "preview");
+	}
+	if (image.mediaType !== "video" && image.displayWidth) {
 		args.push("--width", String(image.displayWidth));
 	}
-	if (image.displayHeight) {
+	if (image.mediaType !== "video" && image.displayHeight) {
 		args.push("--height", String(image.displayHeight));
 	}
-	if (image.alt) {
+	if (image.mediaType !== "video" && image.alt) {
 		args.push("--caption", image.alt);
 	}
 	args.push("--json");
@@ -196,15 +209,53 @@ function findEmbeddedCheckbox(
 	};
 }
 
-function hasImageAfter(
+function hasMediaAfter(
 	remoteXml: string,
 	location: PlaceholderLocation,
-	blockId: string
+	blockId: string,
+	media: LocalImageResource
 ): boolean {
 	const adjacentContent = remoteXml.slice(location.endIndex).trimStart();
+	if (media.mediaType === "video") {
+		const figure = findVideoFigure(adjacentContent, blockId);
+		return Boolean(figure && figure.startIndex === 0);
+	}
 	const escapedBlockId = escapeRegExp(blockId);
 	return new RegExp(`^<img\\b[^>]*\\bid=["']${escapedBlockId}["'][^>]*(?:\\/>|>[\\s\\S]*?<\\/img>)`, "i")
 		.test(adjacentContent);
+}
+
+function resolveInsertedBlockId(remoteXml: string, blockId: string, media: LocalImageResource): string | null {
+	if (media.mediaType === "video") {
+		// File insertion returns a source id; move its figure to preserve the Preview player.
+		return findVideoFigure(remoteXml, blockId)?.blockId || null;
+	}
+	return hasImageBlock(remoteXml, blockId) ? blockId : null;
+}
+
+function findVideoFigure(
+	remoteXml: string,
+	insertedBlockId: string
+): { blockId: string; startIndex: number } | null {
+	const figures = /<figure\b([^>]*)>([\s\S]*?)<\/figure>/gi;
+	let figure: RegExpExecArray | null;
+	while ((figure = figures.exec(remoteXml))) {
+		const attributes = figure[1] || "";
+		const blockId = readBlockId(attributes);
+		if (!blockId || !/\bview-type=["']preview["']/i.test(attributes)) continue;
+		const source = (figure[2] || "").match(/<source\b([^>]*)\/?\s*>/i);
+		const sourceAttributes = source?.[1] || "";
+		if (!source || (blockId !== insertedBlockId && readBlockId(sourceAttributes) !== insertedBlockId)) continue;
+		if (/\bmime=["'][^"']*["']/i.test(sourceAttributes)
+			&& !/\bmime=["']video\//i.test(sourceAttributes)) continue;
+		return { blockId, startIndex: figure.index };
+	}
+	return null;
+}
+
+function hasVideoUploadBlock(remoteXml: string, blockId: string): boolean {
+	return [...remoteXml.matchAll(/<(?:figure|source)\b([^>]*)>/gi)]
+		.some((match) => readBlockId(match[1] || "") === blockId);
 }
 
 function hasImageBlock(remoteXml: string, blockId: string): boolean {

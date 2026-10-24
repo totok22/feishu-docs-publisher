@@ -829,6 +829,34 @@ unsavedPdfPlugin.hasUnsavedSettings = true;
 unsavedPdfPlugin.saveData = async () => { throw new Error("disk still unavailable"); };
 await assert.rejects(unsavedPdfPlugin.syncPdfFileUnlocked(fakePdf),/disk still unavailable/);
 assert.equal(unsavedPdfPlugin.hasUnsavedSettings,true,"failed post-upload durability must be retried before reporting success");
+
+const mediaEventsPlugin = createPlugin();
+mediaEventsPlugin.settings.autoSyncMode = "save";
+const vaultEvents = new Map();
+const queuedMediaPaths = [];
+mediaEventsPlugin.app = { vault: { on: (event, handler) => { vaultEvents.set(event, handler); } } };
+mediaEventsPlugin.registerEvent = () => {};
+mediaEventsPlugin.queueImageReferenceAutoSync = async (paths) => { queuedMediaPaths.push(paths); };
+mediaEventsPlugin.registerSaveAutoSync();
+for (const [event, path, oldPath] of [
+	["modify", "assets/demo.mp4"],
+	["create", "assets/demo.m4v"],
+	["delete", "assets/demo.MOV"],
+	["rename", "assets/demo.webm", "assets/old.webm"],
+	["rename", "assets/renamed.bin", "assets/old.mp4"]
+]) {
+	const file = Object.assign(new globalThis.__TFileClass(), { path, extension: path.split(".").pop() });
+	vaultEvents.get(event)(file, oldPath);
+}
+assert.deepEqual(queuedMediaPaths, [
+	["assets/demo.mp4"], ["assets/demo.m4v"], ["assets/demo.MOV"],
+	["assets/old.webm", "assets/demo.webm"], ["assets/old.mp4", "assets/renamed.bin"]
+], "video attachment events must resync their referencing notes, including renames away from a video extension");
+const unrelatedFile = Object.assign(new globalThis.__TFileClass(), { path: "assets/data.bin", extension: "bin" });
+vaultEvents.get("modify")(unrelatedFile);
+mediaEventsPlugin.settings.autoSyncMode = "manual";
+vaultEvents.get("modify")(Object.assign(new globalThis.__TFileClass(), { path: "assets/demo.mp4", extension: "mp4" }));
+assert.equal(queuedMediaPaths.length, 5, "unrelated attachments and manual mode must not trigger auto sync");
 delete globalThis.__TFileClass;
 
 const combinedFolderPlugin = createPublishingPlugin();

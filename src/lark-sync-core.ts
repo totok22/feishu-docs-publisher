@@ -1,4 +1,4 @@
-import { isLocalImagePlaceholder } from "./local-image";
+import { isLocalImagePlaceholder, isLocalVideoPlaceholder } from "./local-image";
 import { stripImageGalleryMarker } from "./image-gallery";
 
 export { buildPublishedPdfTargets, rewritePublishedPdfLinks } from "./pdf-links";
@@ -7,9 +7,13 @@ export { createMediaUploadJournal } from "./media-upload-journal";
 
 export {
 	buildLocalImageFileIndex,
+	buildLocalMediaFileIndex,
 	containsLocalImagePlaceholders,
 	findReferencingMarkdownFiles,
 	isSupportedImagePath,
+	isSupportedLocalMediaPath,
+	isSupportedVideoPath,
+	isLocalVideoPlaceholder,
 	prepareLocalImages,
 	scanLocalImageReferences
 } from "./local-image";
@@ -102,13 +106,13 @@ export interface StagedMarkdownPublishPlan {
 }
 
 export function invalidateLocalImageSyncState(state: DocumentSyncState): DocumentSyncState {
-	if (!state.units.some((unit) => unit.kind === "img")) {
+	if (!state.units.some((unit) => unit.kind === "img" || unit.kind === "figure")) {
 		return state;
 	}
 	return {
 		...state,
 		contentHash: "",
-		units: state.units.map((unit) => unit.kind === "img" ? { ...unit, hash: "" } : unit)
+		units: state.units.map((unit) => unit.kind === "img" || unit.kind === "figure" ? { ...unit, hash: "" } : unit)
 	};
 }
 
@@ -1447,7 +1451,7 @@ function areSameFingerprintUnit(
 	remoteUnit: RemoteSyncUnit
 ): boolean {
 	return markdownUnit.kind === remoteUnit.kind
-		&& (markdownUnit.kind === "img" || markdownUnit.fingerprint === remoteUnit.fingerprint);
+		&& (markdownUnit.kind === "img" || markdownUnit.kind === "figure" || markdownUnit.fingerprint === remoteUnit.fingerprint);
 }
 
 export async function createSyncContentSignature(markdown: string): Promise<SyncContentSignature> {
@@ -1598,7 +1602,7 @@ export function isSyncContentSignatureEquivalent(
 	return areSyncContentUnitsEquivalent(current.units, expected.units);
 }
 
-// Feishu rehosts imported images. Ignore their new URLs only when confirming a
+// Feishu rehosts imported media. Ignore their new URLs only when confirming a
 // submitted write; planning and cached state comparisons still use source hashes.
 export async function isRemoteMarkdownContentEquivalent(
 	remoteMarkdown: string,
@@ -1609,7 +1613,7 @@ export async function isRemoteMarkdownContentEquivalent(
 	return current.units.length === expected.units.length && current.units.every((unit, index) => {
 		const expectedUnit = expected.units[index];
 		return unit.kind === expectedUnit?.kind
-			&& (unit.kind === "img" || unit.hash === expectedUnit.hash);
+			&& (unit.kind === "img" || unit.kind === "figure" || unit.hash === expectedUnit.hash);
 	});
 }
 
@@ -1627,7 +1631,7 @@ export async function isRemoteXmlContentEquivalent(remoteXml: string, markdown: 
 		}
 
 		return unit.kind === remoteUnit.kind
-			&& (unit.kind === "img" || unit.fingerprint === remoteUnit.fingerprint);
+			&& (unit.kind === "img" || unit.kind === "figure" || unit.fingerprint === remoteUnit.fingerprint);
 	});
 }
 
@@ -2700,7 +2704,7 @@ function splitMarkdownTopLevelBlocks(markdown: string): Array<{ kind: string; co
 
 		const start = index;
 		const kind = isMarkdownTableStart(lines, index) ? "table" : readMarkdownBlockKind(line);
-		if (kind === "heading" || kind === "hr" || kind === "img") {
+		if (kind === "heading" || kind === "hr" || kind === "img" || kind === "figure") {
 			index += 1;
 		} else if (kind === "code") {
 			index += 1;
@@ -2776,6 +2780,10 @@ function isMarkdownParagraphLabelBoundary(line: string): boolean {
 }
 
 function readMarkdownBlockKind(line: string): string {
+	if (isLocalVideoPlaceholder(line) || /^\s*<figure\b[^>]*>/i.test(line)) {
+		return "figure";
+	}
+
 	if (isLocalImagePlaceholder(line)
 		|| /^\s*<img\b[^>]*>\s*$/i.test(line)
 		|| /^\s*!\[[^\]]*\]\([^\n]+\)\s*$/.test(line)) {
@@ -2960,7 +2968,7 @@ function createUnitFingerprintKey(unit: { kind: string; fingerprint: string }): 
 }
 
 function createMarkdownFingerprint(kind: string, content: string): string {
-	if (kind === "hr" || kind === "img") {
+	if (kind === "hr" || kind === "img" || kind === "figure") {
 		return "";
 	}
 
@@ -2995,7 +3003,7 @@ function createMarkdownFingerprint(kind: string, content: string): string {
 }
 
 function createMarkdownComparisonContent(kind: string, content: string): string {
-	if (kind === "img") {
+	if (kind === "img" || kind === "figure") {
 		return content.trim();
 	}
 

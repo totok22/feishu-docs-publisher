@@ -123,6 +123,7 @@ import {
 	containsLocalImagePlaceholders,
 	findReferencingMarkdownFiles,
 	isSupportedImagePath,
+	isSupportedLocalMediaPath,
 	LocalImageResource,
 	prepareLocalImages,
 	scanLocalImageReferences
@@ -1073,23 +1074,23 @@ export default class LarkCliSyncPlugin extends Plugin {
 			}
 			if (file.extension === "md") {
 				this.queueSaveAutoSync(file);
-			} else if (isSupportedImagePath(file.path)) {
+			} else if (isSupportedLocalMediaPath(file.path)) {
 				void this.queueImageReferenceAutoSync([file.path]);
 			}
 		}));
 		this.registerEvent(this.app.vault.on("create", (file) => {
-			if (this.settings.autoSyncMode === "save" && file instanceof TFile && isSupportedImagePath(file.path)) {
+			if (this.settings.autoSyncMode === "save" && file instanceof TFile && isSupportedLocalMediaPath(file.path)) {
 				void this.queueImageReferenceAutoSync([file.path]);
 			}
 		}));
 		this.registerEvent(this.app.vault.on("delete", (file) => {
-			if (this.settings.autoSyncMode === "save" && file instanceof TFile && isSupportedImagePath(file.path)) {
+			if (this.settings.autoSyncMode === "save" && file instanceof TFile && isSupportedLocalMediaPath(file.path)) {
 				void this.queueImageReferenceAutoSync([file.path]);
 			}
 		}));
 		this.registerEvent(this.app.vault.on("rename", (file, oldPath) => {
 			if (this.settings.autoSyncMode === "save" && file instanceof TFile
-				&& (isSupportedImagePath(file.path) || isSupportedImagePath(oldPath))) {
+				&& (isSupportedLocalMediaPath(file.path) || isSupportedLocalMediaPath(oldPath))) {
 				void this.queueImageReferenceAutoSync([oldPath, file.path]);
 			}
 		}));
@@ -2865,7 +2866,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 	private getVaultRoot(): string {
 		const adapter = this.app.vault.adapter;
 		if (!(adapter instanceof FileSystemAdapter)) {
-			throw new LocalizedSyncError("本地图片同步仅支持桌面端文件系统 vault。");
+			throw new LocalizedSyncError("本地媒体同步仅支持桌面端文件系统 vault。");
 		}
 		return adapter.getBasePath();
 	}
@@ -3840,7 +3841,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 				});
 				const blockId = result.data?.block_id || result.data?.document?.new_blocks?.[0]?.block_id;
 				if (!blockId) {
-					throw new Error(`图片上传后未返回 block id：${image.vaultPath}`);
+					throw new Error(`${image.mediaType === "video" ? "视频" : "图片"}上传后未返回 block id：${image.vaultPath}`);
 				}
 				return { blockId };
 			},

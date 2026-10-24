@@ -41,6 +41,7 @@ import {
 	collectIgnoreDirectories,
 	ignoreFilePath,
 	invalidateLocalImageSyncState,
+	isSupportedLocalMediaPath,
 	isSyncContentSignatureEquivalent,
 	mergeSyncStateFiles,
 	materializeLocalImages,
@@ -137,7 +138,7 @@ async function collectChangedFiles() {
 
 async function collectSyncMarkdownFiles(repoRoot, changedFiles) {
 	const markdownFiles = changedFiles.filter((file) => file.endsWith(".md"));
-	const imageFiles = changedFiles.filter((file) => isSupportedImageFile(file));
+	const imageFiles = changedFiles.filter((file) => isSupportedLocalMediaPath(file));
 	if (imageFiles.length === 0) {
 		return uniqueFiles(markdownFiles);
 	}
@@ -187,10 +188,6 @@ function uniqueFiles(files) {
 	}
 
 	return result;
-}
-
-function isSupportedImageFile(path) {
-	return /\.(?:png|jpe?g|gif|webp|bmp)$/i.test(path);
 }
 
 /** Rule files (.feishuignore) that can apply to these vault paths. One that cannot be read stops the push rather than being skipped. */
@@ -569,7 +566,7 @@ async function materializeImagesForTask(settings, doc, images) {
 			);
 			const blockId = result.data?.block_id || result.data?.document?.new_blocks?.[0]?.block_id;
 			if (!blockId) {
-				throw new Error(`图片上传后未返回 block id：${image.vaultPath}`);
+				throw new Error(`${image.mediaType === "video" ? "视频" : "图片"}上传后未返回 block id：${image.vaultPath}`);
 			}
 			return { blockId };
 		},
