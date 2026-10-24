@@ -148,6 +148,10 @@ lark_doc_url: "https://example.feishu.cn/docx/xxxx"
 
 PNG, JPEG/JPG, GIF, WebP, and BMP are supported. Images must stay inside the current vault. HTTP(S) images continue through the Markdown import path. Save-after-sync and Git pre-push both sync bound notes that reference an image when only that image changes.
 
+### Local videos
+
+Embed a vault-local video with `![[clip.mp4]]` or `![Demo](../assets/clip.mp4)`. MP4, M4V, MOV, and WebM files are uploaded as Feishu/Lark inline file previews. Playback depends on the codec and the Feishu/Lark client; H.264/AAC MP4 and MOV have been tested. Unchanged videos are reused when syncing again or editing nearby text. Save-after-sync and Git pre-push also detect changes to referenced video files. Ordinary links and remote video URLs are not uploaded.
+
 ### Folder sync
 
 Right-click a folder and choose `Lark: Sync to Feishu/Lark`. The plugin creates the matching remote hierarchy, syncs Markdown and PDF files, and rewrites Markdown internal links in the uploaded content.
@@ -213,7 +217,7 @@ Feishu/Lark displays the remote PDF filename. Aliases, page numbers, and preview
 
 Git hooks also reuse PDF bindings and rewrite references with vault paths or paths relative to the note. Short filenames in other folders require Obsidian's resolver; include a path when using a hook.
 
-Persistent bindings and content hashes skip unchanged PDFs. Changes overwrite the same file token and preserve its link. Local renames migrate the association while preserving the remote name. PDFs update through manual or folder sync; save-triggered sync and Git hooks still cover Markdown and referenced images only.
+Persistent bindings and content hashes skip unchanged PDFs. Changes overwrite the same file token and preserve its link. Local renames migrate the association while preserving the remote name. PDFs update through manual or folder sync; save-triggered sync and Git hooks still cover Markdown and referenced images and videos only.
 
 Explicit PDF overwrite replaces the same remote file even when the local file is unchanged. Without a binding, it first reuses a same-name file. After a successful upload, it removes other same-name PDFs from that remote parent.
 
