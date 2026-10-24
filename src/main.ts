@@ -170,7 +170,7 @@ const DEFAULT_SETTINGS: LarkCliSyncSettings = {
 	publishedFolders: {},
 	titleSource: "file-name",
 	openAfterSync: true,
-	updateFrontmatter: true,
+	updateFrontmatter: false,
 	autoSyncMode: "save",
 	autoSyncDelaySeconds: 15,
 	syncStrategy: "auto",
