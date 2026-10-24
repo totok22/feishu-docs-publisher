@@ -2,33 +2,250 @@
 
 English | [简体中文](./README_ZH.md)
 
-Publish Markdown notes, folders, and PDFs to Feishu/Lark Docs and keep them in sync through the local `lark-cli`.
+Publish Markdown notes, folders, and PDFs from Obsidian to Feishu/Lark Docs through the local `lark-cli`, and keep them in sync.
 
-Use it when Obsidian is the local source of truth and Feishu/Lark is where the team reads, comments, and collaborates.
+Obsidian stays the source of truth, and Feishu/Lark is where your team reads and comments. Sync is one-way. After the first publish a note is bound to its document, and later syncs update that document in place.
 
----
+You need Obsidian 1.13.0 or later (desktop only), a Feishu or Lark account, and Node.js with npm. The plugin installs `lark-cli` for you. Notes are uploaded through `lark-cli`; see [Network & Third-Party Account Disclosures](#network--third-party-account-disclosures).
 
-## Network & Third-Party Account Disclosures
-
-- **Third-Party Account**: Sync requires a Feishu or Lark account. Sign-in, sign-out, and reauthorization are available in the plugin's **CLI & authorization** settings. The plugin calls the local [`lark-cli`](https://github.com/larksuite/cli) and does not collect app secrets.
-- **Network Access**: Installing or upgrading `lark-cli` runs the local npm client against the npm Registry, and the `@larksuite/cli` installer downloads the matching official program. Publish, sync, overwrite, link lookup, and version checks run `lark-cli`, which sends HTTPS requests to the official Feishu/Lark Open APIs (`open.feishu.cn` for Feishu accounts, `open.larksuite.com` for Lark accounts). Requests run when you sync or publish, and also from save-triggered sync and the Git `pre-push` hook when those modes are enabled. There is no separate telemetry channel.
-- **Credential Storage**: Login credentials stay in the local `lark-cli` auth store. This plugin does not write app secrets or access tokens into notes, `data.json`, or logs. Document URLs and bindings are stored in plugin data, and optionally in note frontmatter when that setting is enabled.
+[Getting started](#getting-started) · [Using the plugin](#using-the-plugin) · [Settings](#settings) · [How sync works](#how-sync-works) · [Troubleshooting](#troubleshooting) · [Migrating](#migrating-from-feishu-lark-cli-sync) · [Contributing](#contributing-and-releases)
 
 ---
 
-## Origin & Credits
+## Getting started
 
-Forked from [wanghuan9/obsidian-feishu-lark-cli-sync](https://github.com/wanghuan9/obsidian-feishu-lark-cli-sync) by huan.wang (wanghuan) under the MIT License. The original repository and the author's GitHub account are no longer available. The original "Feishu Lark CLI Sync" plugin was archived in the Obsidian community directory. This project continues from 0.1.26, maintained by [totok22](https://github.com/totok22), with added published-link management, PDF sync and dedup, and related sync fixes, under the new plugin ID `feishu-docs-publisher`. It is not officially affiliated with the original author. It is unrelated to [zktww/feishu-lark-sync](https://github.com/zktww/feishu-lark-sync) ("Feishu Lark Sync"), which is an independent codebase. The original copyright is retained in `LICENSE`.
+### 1. Install the plugin
+
+If you used the old "Feishu Lark CLI Sync" plugin, read [Migrating](#migrating-from-feishu-lark-cli-sync) first.
+
+**Community plugins** (once the plugin is listed): open **Settings → Community plugins**, turn off Restricted mode, click **Browse**, search for `Feishu Docs Publisher`, then **Install** and **Enable**.
+
+**From a release**: download `main.js`, `manifest.json`, and `styles.css` from [GitHub Releases](https://github.com/totok22/feishu-docs-publisher/releases), put them in `<vault>/.obsidian/plugins/feishu-docs-publisher/`, then reload community plugins and enable the plugin. The Git hook scripts are embedded in `main.js`, so nothing else is needed.
+
+**From source**:
+
+```bash
+git clone https://github.com/totok22/feishu-docs-publisher.git
+cd feishu-docs-publisher
+npm install
+npm run build
+./install.sh "/path/to/your/vault"
+```
+
+The script copies the build into the vault's plugin folder, and refreshes the hook helper scripts if this plugin already installed a hook there. Restart Obsidian and enable the plugin.
+
+### 2. Connect your account
+
+Open **Settings → Feishu Docs Publisher → CLI & authorization**. No terminal is needed.
+
+1. If npm is missing, click **Download Node.js**, install it, then click **Check again**.
+2. Click **Install lark-cli**. The same button upgrades it later.
+3. First time only: under **CLI app configuration**, choose Feishu or Lark, click **Create app**, and finish the flow in your browser.
+4. Click **Sign in / reauthorize** and approve the permissions in your browser. To switch accounts, sign out and sign in again.
+
+`lark-cli` must be newer than 1.0.53. Older versions can create documents titled `Untitled` or fail while syncing, and settings offer an upgrade when that happens. If the executable is not detected, enter its absolute path under **lark-cli path**.
+
+Behind a proxy? **Network proxy** inherits `HTTPS_PROXY`, `HTTP_PROXY`, or `ALL_PROXY` by default. You can also enter a custom HTTP proxy (for example `127.0.0.1` and `7890`) or turn proxies off. It only applies to the `lark-cli`, npm, and Git `pre-push` processes this plugin starts, and no proxy credentials are stored.
+
+### 3. Publish your first note
+
+1. Optional: set **Settings → General → Default target** to a Wiki URL, wiki node token, or folder token. Left blank, documents go to your personal library.
+2. Right-click a note and choose **Lark: Sync to Feishu/Lark**. The command palette has the same `Sync to Feishu/Lark` for the open note.
+3. The new document opens in your browser. Its title is the file name unless you change **Title source**.
+4. Edit the note and sync again to update the same document. By default a saved note also syncs on its own after about 15 seconds; see [Auto sync](#auto-sync).
+
+---
+
+## Using the plugin
+
+### Quick reference
+
+Right-click a note, PDF, or folder. Sync, overwrite, open link, published files, and choose files to ignore are also in the command palette.
+
+| I want to… | Do this |
+| --- | --- |
+| Publish or update a note | Right-click the note → `Lark: Sync to Feishu/Lark` |
+| Publish a folder and keep its structure | Right-click the folder → `Lark: Sync to Feishu/Lark` |
+| Upload a PDF | Right-click the PDF → `Lark: Sync to Feishu/Lark` |
+| Make the remote copy match local and remove same-name duplicates | `Lark: Overwrite sync to Feishu/Lark` |
+| Attach a note, PDF, or folder to an existing document | `Lark: Set Feishu/Lark link` |
+| Open the Feishu/Lark page of a file | `Lark: Open Feishu/Lark link` |
+| Find or copy published links | Paper-plane icon in the left ribbon → **Published files** |
+| Keep some files out of a folder sync | Right-click the folder → `Lark: Choose files to ignore` |
+| Sync automatically after editing | **Settings → Sync → Auto sync mode** |
+
+### Sync and overwrite
+
+Sync publishes a note the first time and updates it afterwards. Overwrite rewrites the remote copy from the local content and deletes other same-name documents in the same remote folder. Both work on notes, PDFs, and folders.
+
+The first publish binds the note to its document, and the binding is saved in plugin data. If you turn on **Write binding to frontmatter** (off by default; an upgrade keeps your saved choice), the URL is also written into the note:
+
+```yaml
+---
+lark_doc_url: "https://example.feishu.cn/docx/xxxx"
+---
+```
+
+A remote file can be bound to only one local file. Setting a link, recovering a binding, and syncing all check this, so fix any shared binding before you sync.
+
+Overwrite works like this:
+
+- It keeps the bound document. With no binding, it picks one existing same-name document, saves the binding, confirms the local content was written, and only then deletes the other same-name documents in that remote folder.
+- Normal sync, save-triggered sync, and Git hooks never delete duplicates. A document bound to another local file is never deleted.
+- A duplicate wiki document with child pages has its children moved under the kept document first.
+- Folder overwrite goes through every Markdown note and PDF and resets folder pages to a sub-page list. If two notes in the same folder produce the same document title, it stops and asks you to rename one.
+
+### Images and videos
+
+Local images and videos are uploaded with the note.
+
+```md
+![[diagram.png]]
+![[diagram.png|600]]
+![[diagram.png|600x400]]
+![Architecture](../assets/diagram.png)
+![[clip.mp4]]
+![Demo](../assets/clip.mp4)
+```
+
+- Images: PNG, JPEG/JPG, GIF, WebP, and BMP. They must be inside the vault. HTTP(S) images go through the normal Markdown import.
+- Videos: MP4, M4V, MOV, and WebM, shown as inline file previews. Playback depends on the codec and the Feishu/Lark client; H.264/AAC MP4 and MOV have been tested. Remote video URLs and ordinary links are not uploaded. Unchanged videos are reused.
+- If only a referenced image or video changes, save-triggered sync and the `pre-push` hook still sync the bound note.
+
+### Sync a folder
+
+Right-click a folder and choose `Lark: Sync to Feishu/Lark`. The plugin creates the matching remote hierarchy, syncs the Markdown notes and PDFs, and rewrites links between notes so they point to the remote documents. Your local notes are not changed.
+
+```md
+Detailed design: 02-database.md
+[Component design](03-components.md#section)
+[[04-api|API design]]
+```
+
+In a wiki (`/wiki/...`) or personal library, each folder is a document, and the plugin inserts Feishu/Lark's native sub-page list into it at every level. Feishu/Lark maintains the links in that list. Normal folder sync keeps an existing list and the rest of the page; folder overwrite resets the page to the list. Drive folders (`/drive/folder/...`) are ordinary folders and get no list.
+
+An image that no note embeds would never be uploaded. Folder sync collects these into a generated note named `<folder> images.md`, saved next to the images, and publishes it like any other note. It is refreshed on every folder sync. You can rename it; a hidden comment on its first line is how the plugin recognizes it.
+
+To also clean up files you deleted or moved, turn on **Delete remote files missing locally** (off by default). After a folder sync, the plugin lists the documents and PDFs it published from that folder whose local file is gone, and deletes them once you confirm.
+
+- Only files with a publish record are touched. Documents you made by hand in Feishu/Lark are safe.
+- A note moved outside Obsidian is kept while another note still links to the same document. A wiki document that still has child pages is skipped.
+- Git history covers the local side. The plugin cannot restore a deleted remote file.
+
+### PDFs
+
+Folder sync uploads PDFs as native files into the matching Drive folders or wiki nodes. You can also right-click a single PDF to upload it. With a blank default target it goes to the Drive root.
+
+Notes can reference PDFs like this:
+
+```md
+[[papers/report.pdf]]
+![[papers/report.pdf]]
+[[report.pdf|Read the report]]
+![[report.pdf#page=2]]
+[Read the report](papers/report.pdf)
+```
+
+After the upload, folder sync rewrites these into native Feishu/Lark file references. Publishing a single note for the first time, manual sync, and save-triggered sync reuse existing PDF bindings. If the PDF is outside the synced folder, upload it first or bind its remote URL.
+
+In Feishu/Lark the reference shows the remote file name. Aliases, page numbers, and preview sizes are dropped, and embeds become clickable file references. PDFs are not converted to Docx or previewed inline. References that are unpublished, pending, missing, or inside code stay as written. Duplicate file names resolve the way Obsidian links do.
+
+- Unchanged PDFs are skipped, based on the binding and a content hash. A changed PDF overwrites the same remote file, so its link stays valid. Renaming a PDF locally keeps the binding and the remote name.
+- PDFs update through manual sync and folder sync only, not through save-triggered sync or Git hooks.
+- Overwrite re-uploads even an unchanged PDF. Without a binding it first reuses a same-name file, and after a successful upload it removes other same-name PDFs in that remote folder.
+- Git hooks rewrite references written with a vault path or a path relative to the note. A bare file name in another folder needs Obsidian's resolver, so write the path when you rely on a hook.
+
+If an upload times out, the plugin keeps a pending record and does not retry on its own. Check the existing remote file in `Lark: Set Feishu/Lark link` before trying again. If no remote file was created, disconnect the pending record and upload again.
+
+### Ignore files and folders
+
+To keep notes, PDFs, or subfolders out of Feishu/Lark, open the **Sync ignore** page: right-click the folder and choose `Lark: Choose files to ignore`. It is also reachable from the **Published files** window, the command palette, and **Settings → Sync → Sync ignore**.
+
+The page shows the folder as a tree. Uncheck an item to ignore it and check it again to sync it. Unchecking a folder ignores everything inside, including files added later, and a folder with some items unchecked shows a partial mark. `Edit rules file` shows the raw text, `Change folder` switches folder, and `Clear rules` empties the current folder's rules.
+
+The choices are saved in a `.feishuignore` file in that folder, and you can also write it by hand. The syntax is the same as `.gitignore`: one pattern per line, `*` and `**` wildcards, a trailing `/` for folders, `!` to bring something back, and `#` for comments. Patterns are relative to the file's folder. A deeper file overrides a higher one, and a `.feishuignore` in the vault root applies everywhere. It is a normal file, so you can commit it or copy it to another vault.
+
+```gitignore
+# Projects/Alpha/.feishuignore
+/Drafts/
+*.draft.md
+!/Drafts/keep.md
+```
+
+Ignored items are skipped by folder sync, save-triggered sync, and the `pre-push` hook. What is already in Feishu/Lark stays, and an image embedded only by an ignored note is not uploaded. Syncing a single note by hand still works. If a `.feishuignore` cannot be read, sync stops instead of publishing without it. Obsidian hides dotfiles, so edit the file from this page or an external editor.
+
+### Auto sync
+
+Auto sync updates notes that are already bound and never publishes new ones. Publish a note once by hand, then pick a mode under **Settings → Sync → Auto sync mode**.
+
+| Mode | When it syncs | Notes |
+| --- | --- | --- |
+| `Off` | Only when you sync by hand | |
+| `Sync after save` (default) | About 15 seconds after you save a bound note (**Save sync delay**) | Obsidian must be running. Edits from another editor count while Obsidian has the vault open. |
+| `Git pre-push hook` | Before each `git push` | The vault must be a Git repository, and you install the hook under **Settings → Git Hook**. Obsidian does not need to be running. If the sync fails, the push is blocked. |
+
+Auto sync covers Markdown notes and the images and videos they reference. PDFs need manual or folder sync. Ignored items are skipped.
+
+### Published files
+
+Click the paper-plane icon in the left ribbon, or run `Published files` from the command palette. Each row shows the file name and local path. **Open in Feishu** opens the remote file. **More** offers copy link, open local file, sync, set link, and remove saved link (both the local and the remote file are kept).
+
+Older versions did not record links when frontmatter was off. **Find existing links** matches note file names against the linked Feishu/Lark folders and never creates files. If several files match, set the link by hand.
+
+---
+
+## Settings
+
+| Setting | What it does | Default |
+| --- | --- | --- |
+| `Language` | Language of settings, menus, and notices (中文 or English) | 中文 |
+| `Default target` | Where new documents go: Wiki URL, wiki node token, or folder token. Blank means your personal library | Blank |
+| CLI & authorization | Install or upgrade `lark-cli`, create the CLI app, sign in or out, set the path. See [step 2](#2-connect-your-account) | |
+| `Network proxy` | System environment, custom HTTP proxy, or no proxy | System environment |
+| `Title source` | First Markdown heading or file name | File name |
+| `Write binding to frontmatter` | Also store the URL as `lark_doc_url`. The binding in plugin data is kept either way | Off |
+| `Open after sync` | Open the document in your browser after publish or sync | On |
+| `Sync strategy` | `Auto (recommended)`: small edits update only the changed blocks, large or complex ones fall back to a full overwrite. `Safe precise sync`: never overwrites, reports an error instead. `Overwrite sync`: rewrites the remote document every time | Auto |
+| `Auto sync mode` | `Off`, `Sync after save`, or `Git pre-push hook`. See [Auto sync](#auto-sync) | Sync after save |
+| `Save sync delay` | Seconds to wait after a save, so continuous edits become one sync | 15 |
+| `Sync ignore` | Opens the [Sync ignore](#ignore-files-and-folders) page | |
+| `Delete remote files missing locally` | Offer to delete remote files whose local file is gone, after a folder sync | Off |
+| `Sync state cache` | How many document states are kept for incremental sync | 100 |
+| `Install hook` | Installs the `pre-push` hook into the vault's `.git/hooks` | |
+
+---
+
+## How sync works
+
+The plugin splits Markdown into top-level blocks and records their Feishu/Lark block ids. Later syncs update only the blocks that changed, such as a replaced, inserted, or deleted paragraph, so Feishu/Lark keeps the matching history. The whole document is rewritten only on overwrite, or when the Auto strategy judges a change too large or too complex.
+
+![Remote history](./docs/images/lark-history.png)
+
+Local Markdown is the source. If someone edits the remote document, merge those edits into the Markdown first, or a later sync can replace them.
+
+The plugin keeps its data in `.obsidian/plugins/feishu-docs-publisher/`. `data.json` holds settings, bindings, and pending records, and is not affected by cache trimming. `lark-sync-state.json` holds the incremental sync state.
+
+---
+
+## Troubleshooting
+
+| Symptom | What to check |
+| --- | --- |
+| New documents are titled `Untitled`, or sync fails right away | `lark-cli` is too old. Upgrade it in **Settings → CLI & authorization**. |
+| `lark-cli` is not found | Click **Check again**, or enter the absolute path under **lark-cli path**. Without npm, install Node.js first. |
+| Installing or syncing cannot connect | Check **Network proxy**. |
+| "Default upload target is invalid or inaccessible" | **Default target** must be a Wiki URL, wiki node token, or folder token your account can open. |
+| Auto sync does nothing | The note must be published first. Also check that **Auto sync mode** is not `Off`, that Obsidian is running in save mode, and that `.feishuignore` does not skip the note. |
+| `git push` is blocked | The `pre-push` sync failed. Fix the error it reports, or switch **Auto sync mode** to another option. |
 
 ---
 
 ## Migrating from Feishu Lark CLI Sync
 
-The plugin id changed from `feishu-lark-cli-sync` to `feishu-docs-publisher`, so Obsidian stores this plugin's data in a new folder. On desktop startup, if `.obsidian/plugins/feishu-docs-publisher/data.json` is not already present, the plugin copies `data.json` and `lark-sync-state.json` from `.obsidian/plugins/feishu-lark-cli-sync/` when those files exist. The old folder is left unchanged.
+The plugin ID changed from `feishu-lark-cli-sync` to `feishu-docs-publisher`, so Obsidian uses a new data folder. On desktop startup, if `.obsidian/plugins/feishu-docs-publisher/data.json` does not exist yet, the plugin copies `data.json` and `lark-sync-state.json` from `.obsidian/plugins/feishu-lark-cli-sync/` when they exist. The old folder is left untouched.
 
-Disable the archived plugin after the new one is enabled so the two copies do not sync the same notes.
-
-The Git `pre-push` hook reads the new folder when its `data.json` exists, and otherwise falls back to the old folder. Opening Obsidian once refreshes the hook helper scripts when the hook was installed by this plugin or its predecessor. Install the hook again from settings if the Git Hook status does not show as installed.
+1. Enable this plugin and disable the archived one, so the two do not sync the same notes.
+2. If you use the `pre-push` hook, open Obsidian once. That refreshes the hook scripts when this plugin or its predecessor installed the hook. If **Git Hook** does not show as installed, install it again. The hook reads the new folder when it has a `data.json`, and falls back to the old folder otherwise.
 
 To copy the files before opening Obsidian:
 
@@ -40,247 +257,25 @@ cp "/path/to/your/vault/.obsidian/plugins/feishu-lark-cli-sync/lark-sync-state.j
   "/path/to/your/vault/.obsidian/plugins/feishu-docs-publisher/lark-sync-state.json"
 ```
 
-Skip a file that does not exist. An existing file in the new folder is not overwritten.
+Skip a file that does not exist. A file already in the new folder is not overwritten.
 
 ---
 
-## Installation
+## Network & Third-Party Account Disclosures
 
-Requires Obsidian 1.13.0 or later on desktop.
-
-### Option 1: Community plugins
-
-After this plugin is listed in the community plugin browser:
-
-1. Open **Settings → Community plugins**.
-2. Turn off Restricted mode and click **Browse**.
-3. Search for `Feishu Docs Publisher`, click **Install**, and then **Enable**.
-
-### Option 2: Manual installation from a release
-
-1. Download `main.js`, `manifest.json`, and `styles.css` from [GitHub Releases](https://github.com/totok22/feishu-docs-publisher/releases).
-2. Create `.obsidian/plugins/feishu-docs-publisher/` in your vault.
-3. Place the three files in that folder.
-4. Reload community plugins and enable **Feishu Docs Publisher**.
-
-The Git hook scripts are embedded in `main.js` and are written into `.git/hooks` when you install the hook. A community or release install does not need extra script files in the plugin folder.
-
-### Option 3: Build from source
-
-```bash
-git clone https://github.com/totok22/feishu-docs-publisher.git
-cd feishu-docs-publisher
-npm install
-npm run build
-./install.sh "/path/to/your/vault"
-```
-
-The install script copies the built plugin into `.obsidian/plugins/feishu-docs-publisher/`. If that vault already has a hook installed by this plugin, the script refreshes the hook helper scripts. Restart Obsidian and enable **Feishu Docs Publisher**.
-
-After enabling it, use **First-time setup** below to install, configure, and sign in to `lark-cli` from plugin settings. You do not need terminal commands for dependency installation.
-
-The GitHub repository and the vault plugin folder are both `feishu-docs-publisher`.
+- **Third-Party Account**: Sync requires a Feishu or Lark account. Sign-in, sign-out, and reauthorization are available in the plugin's **CLI & authorization** settings. The plugin calls the local [`lark-cli`](https://github.com/larksuite/cli) and does not collect app secrets.
+- **Network Access**: Installing or upgrading `lark-cli` runs the local npm client against the npm Registry, and the `@larksuite/cli` installer downloads the matching official program. Publish, sync, overwrite, link lookup, and version checks run `lark-cli`, which sends HTTPS requests to the official Feishu/Lark Open APIs (`open.feishu.cn` for Feishu accounts, `open.larksuite.com` for Lark accounts). Requests run when you sync or publish, and also from save-triggered sync and the Git `pre-push` hook when those modes are enabled. There is no separate telemetry channel.
+- **Credential Storage**: Login credentials stay in the local `lark-cli` auth store. This plugin does not write app secrets or access tokens into notes, `data.json`, or logs. Document URLs and bindings are stored in plugin data, and also in note frontmatter when that setting is enabled.
 
 ---
 
-## First-time setup
+## Origin & Credits
 
-You do not need to open a terminal for first-time setup. Open **Feishu Docs Publisher → CLI & authorization** in Obsidian settings and follow the status shown there:
-
-1. If npm is missing, click **Download Node.js**, complete the Node.js installation, and return to settings to click **Check again**.
-2. Click **Install lark-cli**. When a later release is available, the same position offers an upgrade.
-3. On first use, when no CLI app is configured, choose Feishu or Lark under **CLI app configuration** and click **Create app**. Complete the official setup flow in your browser.
-4. Click **Sign in / reauthorize** and approve the requested permissions in your browser. The current user appears after success. To switch accounts, sign out and authorize again.
-
-The plugin requires `lark-cli > 1.0.53`. Older versions may create documents titled `Untitled` or fail during sync; settings show an upgrade action when this applies.
-
-If auto-detection cannot find the executable, set its absolute path under **lark-cli path**. Settings also show the npm and CLI versions, the latest available version, and login status.
-
-### Network proxy
-
-The **Network proxy** setting has three choices:
-
-- **Use system environment (recommended)**: inherit `HTTPS_PROXY`, `HTTP_PROXY`, or `ALL_PROXY`.
-- **Use a custom HTTP proxy**: enter a host and port, such as `127.0.0.1` and `7890`.
-- **Do not use a proxy**: make CLI and npm child processes ignore proxy environment variables.
-
-Proxy settings affect only `lark-cli`, npm, and Git `pre-push` sync processes started by this plugin. They do not change the operating system or global `lark-cli` configuration. The plugin does not store proxy usernames or passwords in plugin data.
+Forked from [wanghuan9/obsidian-feishu-lark-cli-sync](https://github.com/wanghuan9/obsidian-feishu-lark-cli-sync) by huan.wang (wanghuan) under the MIT License. The original repository and the author's GitHub account are no longer available, and the original "Feishu Lark CLI Sync" plugin was archived in the Obsidian community directory. This project continues from 0.1.26 under the new plugin ID `feishu-docs-publisher`, maintained by [totok22](https://github.com/totok22), with published-link management, PDF sync and dedup, and related sync fixes added. It is not officially affiliated with the original author, and it is unrelated to [zktww/feishu-lark-sync](https://github.com/zktww/feishu-lark-sync) ("Feishu Lark Sync"), an independent codebase. The original copyright is retained in `LICENSE`.
 
 ---
 
-## Usage
-
-### Single-note sync
-
-Markdown files, PDFs, and folders share four context-menu actions:
-
-- `Lark: Sync to Feishu/Lark`: sync the selected note, PDF, or folder; publish it when no binding exists.
-- `Lark: Overwrite sync to Feishu/Lark`: overwrite from local content and remove other same-name documents in the corresponding remote parent.
-- `Lark: Set Feishu/Lark link`: bind an existing remote document, PDF, or folder.
-- `Lark: Open Feishu/Lark link`: open the bound remote page; disabled when no URL is available.
-
-The command palette's `Overwrite sync to Feishu/Lark` performs the same single-note operation. A remote file may be bound to only one local file. Link assignment, binding recovery, and sync check for conflicts; existing shared bindings must be corrected before syncing.
-
-Explicit overwrite retains the bound document. Without a binding, it chooses one stable existing match. The binding is saved and the local-content write confirmed before other same-name documents in that remote parent are deleted. Normal sync, save-triggered sync, and Git hooks do not delete duplicates. A document bound to another local file cannot be deleted as a duplicate.
-
-Before deleting a duplicate wiki document, the plugin moves its child pages under the retained document. Folder overwrite recursively overwrites Markdown and PDF files and resets folder document bodies to native sub-page lists. If sibling Markdown notes use identical document titles, overwrite stops and asks you to use distinct titles.
-
-![Actions](./docs/images/obsidian-actions.png)
-
-Sync is one-way from Obsidian to Feishu/Lark. The local Markdown note is the source.
-
-Bindings are stored in plugin data. With “Write binding to frontmatter” enabled, this optional field is also written:
-
-```yaml
----
-lark_doc_url: "https://example.feishu.cn/docx/xxxx"
----
-```
-
-### Local images
-
-```md
-![[diagram.png]]
-![[diagram.png|600]]
-![[diagram.png|600x400]]
-![Architecture](../assets/diagram.png)
-```
-
-PNG, JPEG/JPG, GIF, WebP, and BMP are supported. Images must stay inside the current vault. HTTP(S) images continue through the Markdown import path. Save-after-sync and Git pre-push both sync bound notes that reference an image when only that image changes.
-
-### Local videos
-
-Embed a vault-local video with `![[clip.mp4]]` or `![Demo](../assets/clip.mp4)`. MP4, M4V, MOV, and WebM files are uploaded as Feishu/Lark inline file previews. Playback depends on the codec and the Feishu/Lark client; H.264/AAC MP4 and MOV have been tested. Unchanged videos are reused when syncing again or editing nearby text. Save-after-sync and Git pre-push also detect changes to referenced video files. Ordinary links and remote video URLs are not uploaded.
-
-### Folder sync
-
-Right-click a folder and choose `Lark: Sync to Feishu/Lark`. The plugin creates the matching remote hierarchy, syncs Markdown and PDF files, and rewrites Markdown internal links in the uploaded content.
-
-Images that no note embeds would never reach the remote, so folder sync collects them into a generated note named `<folder> images.md`, stored in the same folder as the images. The note embeds each unreferenced image with a `![[path]]` link and is published like any other note. Images already embedded by a note are skipped. The next folder sync refreshes the note as images are added, removed, or later referenced. You can rename the note; the plugin recognizes it by a hidden comment on its first line.
-
-Turn on **Delete remote files missing locally** in settings (off by default) to also clean up after files you deleted or moved away. After a successful folder sync the plugin lists the Feishu/Lark documents and PDFs it published from that folder whose local file no longer exists, and deletes them once you confirm. Only files with a publish record are touched, so documents you created by hand in Feishu/Lark are never deleted. A note you moved outside Obsidian is kept while any existing note still links to the same remote document, and a wiki document that still has child pages is skipped. Your Git history is the safety net for the local side; the remote copy is not recoverable from the plugin.
-
-In a wiki (`/wiki/...`) or personal document library, each folder is itself a document. The plugin inserts a native Feishu/Lark sub-page list into folder documents at every level. Feishu/Lark maintains those document links; the plugin does not generate the links or embed child document content.
-
-Normal folder sync reuses an existing list and preserves other content on the folder page. Folder overwrite resets the folder page body to its native sub-page list. Drive targets (`/drive/folder/...`) use ordinary folders and do not receive a list.
-
-Supported link forms:
-
-```md
-Detailed design: 02-database.md
-[Component design](03-components.md#section)
-[[04-api|API design]]
-```
-
-Local notes remain unchanged.
-
-### Ignoring files and folders
-
-To keep some notes, PDFs, or subfolders of a synced folder out of Feishu/Lark, list them in a `.feishuignore` file inside that folder. It works like `.gitignore`: one pattern per line, `*` and `**` wildcards, a trailing `/` for folders, `!` to bring something back, `#` for comments. Patterns are relative to the folder the file sits in, and a file deeper in the tree overrides one higher up (a `.feishuignore` in the vault root applies everywhere). Because it is a plain file, you can edit it by hand, commit it to Git, or copy it to another folder or vault to reuse the rules.
-
-```gitignore
-# Projects/Alpha/.feishuignore
-/Drafts/
-*.draft.md
-!/Drafts/keep.md
-```
-
-You do not have to write it yourself. Open the `Sync ignore` page: right-click the folder and choose `Lark: Choose files to ignore`, or choose `Sync ignore` in the `Published files` window, the command palette, or the plugin settings and pick the folder there. The page shows only that folder as a tree. Uncheck a file or subfolder to ignore it; check it again to sync it. A folder with some items unchecked shows a partial mark, and unchecking a folder ignores everything inside it, including files added later. The page writes the matching lines to the folder's `.feishuignore`; use `Edit rules file` there to see or change the raw text, `Change folder` to switch folders, and `Clear rules` to empty the current folder's file.
-
-Ignored items are skipped by folder sync, auto-sync on save, and the Git pre-push hook. Content already in Feishu/Lark is kept, and images that only an ignored note embeds are not uploaded. Syncing a single note by hand with the command or the file menu still works. If a `.feishuignore` cannot be read, the sync stops instead of publishing without it. Obsidian does not show dotfiles in its file list, so use the page or an external editor to change the file.
-
-### Published files
-
-Click the paper-plane ribbon icon, or use the command palette, to open `Published files`. Copying links and browsing saved records are available in this window.
-
-Each row shows the filename and local path. Use `Open in Feishu` to view the file. The `More` menu offers copy link, open local file, sync, set link, and remove saved link. Removing a saved link keeps both local and Feishu files.
-
-Older versions may not have recorded links when frontmatter was disabled. Use `Find existing links` to match note filenames inside associated Feishu folders. If several files match, set the link manually. This action never creates Feishu files.
-
-### PDF files
-
-Folder sync uploads PDFs as native files inside the matching Drive folders or wiki nodes. A PDF context menu can also upload one file; a blank default target uploads a standalone PDF to the Drive root.
-
-Supported PDF references:
-
-```md
-[[papers/report.pdf]]
-![[papers/report.pdf]]
-[[report.pdf|Read the report]]
-![[report.pdf#page=2]]
-[Read the report](papers/report.pdf)
-```
-
-After uploading PDFs, folder sync rewrites these references into native Feishu/Lark file references. First-time single-note publishing, manual updates, and save-triggered sync also reuse existing PDF bindings. For a PDF outside the synced folder, upload it separately or bind its existing remote URL before syncing the note. Local wiki links and embeds remain unchanged.
-
-Feishu/Lark displays the remote PDF filename. Aliases, page numbers, and preview dimensions are omitted; embeds also become clickable file references. PDFs are not converted to Docx or expanded into page previews. Unpublished, pending, missing, and code-example references stay literal. Duplicate filenames are resolved with Obsidian's link resolver.
-
-Git hooks also reuse PDF bindings and rewrite references with vault paths or paths relative to the note. Short filenames in other folders require Obsidian's resolver; include a path when using a hook.
-
-Persistent bindings and content hashes skip unchanged PDFs. Changes overwrite the same file token and preserve its link. Local renames migrate the association while preserving the remote name. PDFs update through manual or folder sync; save-triggered sync and Git hooks still cover Markdown and referenced images and videos only.
-
-Explicit PDF overwrite replaces the same remote file even when the local file is unchanged. Without a binding, it first reuses a same-name file. After a successful upload, it removes other same-name PDFs from that remote parent.
-
-An upload timeout keeps a pending record and stops blind retries. Reconcile the existing remote file through the binding editor before retrying. If no remote file was created, disconnect the pending local record and upload again.
-
-### Auto sync
-
-Auto sync only handles already bound documents. Publish once with `Lark: Sync to Feishu/Lark` so the binding is saved. Later save-after-sync or Git hook sync can then update that file. Frontmatter is optional.
-
-#### Trigger modes
-
-- `Off`: manual sync only.
-- `Sync after save`: while Obsidian is running, sync bound Markdown notes after file save events.
-- `Git pre-push hook`: sync bound Markdown notes before `git push`.
-
-`Sync after save` depends on Obsidian receiving file change events. It runs for edits inside Obsidian, and for edits from another editor while Obsidian has the vault open. It does not run when Obsidian is closed.
-
-`Git pre-push hook` depends only on `git push`. Install it from the `Git Hook` settings section. If sync fails, the current `git push` is blocked.
-
----
-
-## Settings
-
-- `CLI & authorization`: install or upgrade `lark-cli`, create a CLI app, sign in or reauthorize, sign out, and view version status.
-- `Network proxy`: use the system proxy, a custom HTTP host and port, or no proxy.
-- `Default target`: Wiki URL, wiki node token, folder token, or blank for the personal library.
-- `Title source`: use the first Markdown heading or the file name.
-- `Write binding to frontmatter`: also store the remote URL in note frontmatter. The plugin-data binding remains either way.
-- `Sync strategy`: automatic by default. Small changes use incremental sync. Large, complex, or unsafe changes fall back to a full overwrite.
-- `Sync state cache`: how many document states are kept for precise sync.
-
-## Incremental sync and remote history
-
-The plugin splits Markdown into top-level blocks and records their Feishu/Lark block ids. Later syncs update changed blocks, such as replacing, inserting, or deleting a paragraph, without rewriting the whole document. Feishu/Lark can keep the corresponding history. The remote document is rewritten when you choose overwrite, or when the automatic strategy decides the change is too large or too complex for an incremental update.
-
-![Remote history](./docs/images/lark-history.png)
-
-Publication bindings and pending attempts are stored in `.obsidian/plugins/feishu-docs-publisher/data.json`. They are independent of sync-state cache trimming.
-
-Precise sync state is stored at:
-
-```text
-.obsidian/plugins/feishu-docs-publisher/lark-sync-state.json
-```
-
-## Notes
-
-- Auto sync only handles already bound notes and does not publish unbound files.
-- If a remote document was edited manually, merge those edits back into the local Markdown file first. Local Markdown is the source of truth.
-
-## Changelog and releases
-
-See [CHANGELOG.md](./CHANGELOG.md) for the release history and [`release-notes/`](./release-notes/) for the notes shown on each GitHub release.
-
-To publish a release:
-
-1. Add the version to `CHANGELOG.md` and create `release-notes/<version>.md`. The file must start with `# <version>`.
-2. Run `npm version <version> --no-git-tag-version`. This updates `package.json`, `package-lock.json`, `manifest.json`, and `versions.json`.
-3. Run `npm run check` and `npm run release:check`.
-4. Commit and push the changes, then push a tag with exactly the same version and no `v` prefix, for example `0.3.0`.
-5. `.github/workflows/release.yml` verifies the tag and release notes, runs the tests and production build, attests the three plugin assets, and opens a draft release from the matching notes file. Review and publish the draft.
-
-## Development
+## Contributing and releases
 
 ```bash
 npm install
@@ -288,7 +283,15 @@ npm test
 npm run build
 ```
 
-`npm test` typechecks and runs the test suite. `npm run build` writes `main.js`, which is gitignored. `npm run check` runs tests and the production build.
+`npm test` typechecks and runs the tests. `npm run build` writes `main.js`, which is gitignored. `npm run check` runs both.
+
+Release history is in [CHANGELOG.md](./CHANGELOG.md), and each GitHub release uses the matching file in [`release-notes/`](./release-notes/). To publish a release:
+
+1. Add the version to `CHANGELOG.md` and create `release-notes/<version>.md`, starting with `# <version>`.
+2. Run `npm version <version> --no-git-tag-version`. It updates `package.json`, `package-lock.json`, `manifest.json`, and `versions.json`.
+3. Run `npm run check` and `npm run release:check`.
+4. Commit and push, then push a tag that matches the version exactly, with no `v` prefix, for example `0.3.0`.
+5. `.github/workflows/release.yml` verifies the tag and notes, runs the tests and production build, attests the three plugin assets, and opens a draft release. Review it and publish.
 
 ## License
 

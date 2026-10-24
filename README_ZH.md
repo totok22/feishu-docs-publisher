@@ -2,9 +2,262 @@
 
 [English](./README.md) | 简体中文
 
-通过本机 `lark-cli` 将 Markdown 笔记、目录和 PDF 发布到飞书 / Lark 云文档，并保持同步。
+通过本机 `lark-cli`，把 Obsidian 里的 Markdown 笔记、目录和 PDF 发布到飞书 / Lark 云文档，并保持同步。
 
-适合把 Obsidian 作为本地写作源，再把内容同步给团队在飞书 / Lark 中阅读、协作和评论。
+内容以 Obsidian 为准，团队在飞书 / Lark 里阅读和评论。同步是单向的。笔记首次发布后会和文档绑定，之后的同步直接更新这篇文档。
+
+需要 Obsidian 1.13.0 或更高版本（仅桌面端）、一个飞书或 Lark 账号，以及 Node.js 和 npm。`lark-cli` 由插件替你安装。笔记通过 `lark-cli` 上传，详见[网络与第三方账号披露](#网络与第三方账号披露)。
+
+[快速开始](#快速开始) · [使用指南](#使用指南) · [设置一览](#设置一览) · [同步原理](#同步原理) · [常见问题](#常见问题) · [迁移](#从-feishu-lark-cli-sync-迁移) · [开发与发布](#开发与发布)
+
+---
+
+## 快速开始
+
+### 1. 安装插件
+
+用过旧插件「Feishu Lark CLI Sync」的话，先看[迁移说明](#从-feishu-lark-cli-sync-迁移)。
+
+**社区插件**（上架后）：打开 **设置 → 社区插件**，关闭安全模式，点「浏览」，搜索 `Feishu Docs Publisher`，「安装」并「启用」。
+
+**从 Release 安装**：到 [GitHub Releases](https://github.com/totok22/feishu-docs-publisher/releases) 下载 `main.js`、`manifest.json` 和 `styles.css`，放进 `<库>/.obsidian/plugins/feishu-docs-publisher/`，重新加载社区插件并启用。Git hook 脚本已经嵌在 `main.js` 里，不需要别的文件。
+
+**从源码构建**：
+
+```bash
+git clone https://github.com/totok22/feishu-docs-publisher.git
+cd feishu-docs-publisher
+npm install
+npm run build
+./install.sh "/path/to/your/vault"
+```
+
+脚本会把构建结果复制到库的插件目录；如果该库已经安装过本插件的 hook，也会刷新 hook 辅助脚本。重启 Obsidian 后启用插件。
+
+### 2. 连接账号
+
+打开 **设置 → Feishu Docs Publisher → CLI 与授权**，不需要打开终端。
+
+1. 没有 npm 的话，点「下载 Node.js」，装好后点「重新检测」。
+2. 点「安装 lark-cli」。以后有新版本，还是这个按钮来升级。
+3. 仅首次使用：在「CLI 应用配置」选飞书或 Lark，点「创建应用」，在浏览器里走完官方流程。
+4. 点「登录 / 重新授权」，在浏览器确认权限。要换账号，先「退出登录」再重新登录。
+
+`lark-cli` 版本必须高于 1.0.53。版本过低可能让新文档的标题变成 `Untitled`，或者同步时报错，设置页会提示升级。自动探测不到可执行文件时，在「lark-cli 路径」里填绝对路径。
+
+需要代理的话，「网络代理」默认沿用系统的 `HTTPS_PROXY`、`HTTP_PROXY` 或 `ALL_PROXY`，也可以填自定义 HTTP 代理（如 `127.0.0.1` 和 `7890`），或者关闭代理。它只作用于本插件启动的 `lark-cli`、npm 和 Git `pre-push` 进程，不会保存代理的用户名和密码。
+
+### 3. 发布第一篇笔记
+
+1. 可选：在 **设置 → 常规 → 默认上传位置** 填 Wiki URL、Wiki 节点 token 或文件夹 token。留空则发到个人文档库。
+2. 右键一篇笔记，选 **Lark: 同步到飞书**。命令面板里也有「同步到飞书」，对当前打开的笔记生效。
+3. 新文档会在浏览器里打开，标题默认是文件名，可以用「标题来源」改。
+4. 改完笔记再同步一次，就会更新同一篇文档。默认设置下，已发布的笔记保存约 15 秒后也会自动同步，见[自动同步](#自动同步)。
+
+---
+
+## 使用指南
+
+### 速查表
+
+在笔记、PDF 或文件夹上右键即可。同步、覆盖同步、打开链接、已发布文件和选择忽略的文件，命令面板里也有。
+
+| 我想… | 怎么做 |
+| --- | --- |
+| 发布或更新一篇笔记 | 右键笔记 → `Lark: 同步到飞书` |
+| 发布整个文件夹并保留层级 | 右键文件夹 → `Lark: 同步到飞书` |
+| 上传 PDF | 右键 PDF → `Lark: 同步到飞书` |
+| 让远端和本地完全一致，并清掉同名重复文档 | `Lark: 覆盖同步到飞书` |
+| 把笔记、PDF 或文件夹绑定到已有的文档 | `Lark: 设置飞书链接` |
+| 打开某个文件对应的飞书页面 | `Lark: 打开飞书链接` |
+| 查找或复制已发布的链接 | 左侧栏纸飞机图标 → 「已发布文件」 |
+| 让文件夹同步跳过一部分文件 | 右键文件夹 → `Lark: 选择忽略的文件` |
+| 编辑后自动同步 | **设置 → 同步 → 自动同步方式** |
+
+### 同步与覆盖
+
+同步：笔记第一次是发布，之后是更新。覆盖：用本地内容重写远端，并删除同一远端目录里其他同名文档。两者都适用于笔记、PDF 和文件夹。
+
+首次发布会把笔记和文档绑定，绑定保存在插件数据中。打开「写入 frontmatter 绑定信息」（默认关闭，升级时保留你已保存的选择）后，链接也会写进笔记：
+
+```yaml
+---
+lark_doc_url: "https://example.feishu.cn/docx/xxxx"
+---
+```
+
+一个远端文件只能绑定一个本地文件。设置链接、恢复绑定和同步前都会检查这一点，已有共享绑定要先改掉。
+
+覆盖同步的规则：
+
+- 保留已绑定的文档。没有绑定时，先选一篇同名文档，保存绑定并确认本地内容已写入，再删除同一远端目录里的其他同名文档。
+- 普通同步、保存后同步和 Git hook 都不会删除重复文档。已被另一个本地文件绑定的文档也不会被删。
+- 要删除的重复 Wiki 文档如果有子页面，会先把子页面移到保留的文档下。
+- 目录覆盖会处理其中所有 Markdown 和 PDF，并把目录页重置为子页面列表。同一目录下两篇笔记的文档标题相同时会停下，请先改名。
+
+### 图片与视频
+
+笔记里的本地图片和视频会随笔记一起上传。
+
+```md
+![[diagram.png]]
+![[diagram.png|600]]
+![[diagram.png|600x400]]
+![架构图](../assets/diagram.png)
+![[clip.mp4]]
+![演示](../assets/clip.mp4)
+```
+
+- 图片：支持 PNG、JPEG/JPG、GIF、WebP 和 BMP，必须在当前库内。HTTP(S) 图片走普通的 Markdown 导入。
+- 视频：支持 MP4、M4V、MOV 和 WebM，显示为文件预览块。能否播放取决于编码和客户端，已实测 H.264/AAC 的 MP4 和 MOV。远程视频地址和普通链接不会上传。没变化的视频会复用。
+- 只有被引用的图片或视频变化时，保存后同步和 `pre-push` 仍会同步引用它的已绑定笔记。
+
+### 同步目录
+
+右键目录，选 `Lark: 同步到飞书`。插件会建好对应的远端层级，同步其中的 Markdown 和 PDF，并把笔记之间的链接改成指向远端文档。本地笔记不会被改动。
+
+```md
+详细设计见 02-database.md。
+[组件设计](03-components.md#section)
+[[04-api|接口设计]]
+```
+
+目标是 Wiki（`/wiki/...`）或个人文档库时，每一级目录本身也是文档，插件会在里面插入飞书 / Lark 原生的子页面列表。列表里的链接由飞书 / Lark 维护。普通目录同步会保留已有的列表和页面上的其他内容，目录覆盖则把页面重置为列表。Drive 目标（`/drive/folder/...`）用的是普通文件夹，没有列表。
+
+没有被任何笔记引用的图片不会上传到飞书。目录同步会把它们收集到一篇自动生成的 `<目录名> 图片.md`，放在图片所在目录，并和其他笔记一样发布。每次目录同步都会刷新它。可以重命名，插件靠第一行的隐藏注释认出它。
+
+想顺带清理你删除或移走的文件，打开「删除本地已不存在的飞书文件」（默认关闭）。目录同步成功后，插件会列出该目录下由它发布、但本地文件已不存在的飞书文档和 PDF，你确认后才会删除。
+
+- 只处理有发布记录的文件，你在飞书里手动建的文档不会动。
+- 在 Obsidian 之外移动的笔记，只要还有笔记链接到同一篇文档就会保留。下面还有子页面的 Wiki 文档会跳过。
+- 本地一侧靠 Git 历史兜底，插件无法恢复已删除的远端文件。
+
+### PDF
+
+目录同步会把 PDF 作为原生文件上传到对应的 Drive 文件夹或知识库节点，也可以右键单个 PDF 上传。默认上传位置为空时，单个 PDF 传到 Drive 根目录。
+
+笔记里可以这样引用 PDF：
+
+```md
+[[规格书/报告.pdf]]
+![[规格书/报告.pdf]]
+[[报告.pdf|查看规格书]]
+![[报告.pdf#page=2]]
+[查看规格书](规格书/报告.pdf)
+```
+
+上传完成后，目录同步会把这些引用改成飞书 / Lark 的原生文件引用。单篇首次发布、手动同步和保存后同步会复用已有的 PDF 绑定。PDF 不在同步目录里时，先单独上传，或绑定它的远端 URL。
+
+飞书 / Lark 里显示的是远端文件名。别名、页码和预览尺寸会丢掉，嵌入也会变成可点击的文件引用。PDF 不会转成 Docx，也不会在正文里展开预览。未发布、待确认、缺失以及代码示例里的引用保持原文。同名文件的解析方式和 Obsidian 链接一致。
+
+- 没变化的 PDF 会跳过，依据是绑定和内容哈希。内容变了就覆盖同一个远端文件，链接不变。本地重命名会保留绑定和远端文件名。
+- PDF 只通过手动同步和目录同步更新，保存后同步和 Git hook 不处理。
+- 覆盖会重新上传，即使 PDF 没变。没有绑定时先复用同名文件，上传成功后再删除同一远端目录里的其他同名 PDF。
+- Git hook 能改写用库路径或相对笔记路径写的引用。其他目录里的短文件名要靠 Obsidian 解析，用 hook 时请写上路径。
+
+上传超时的话，插件会保留一条待确认记录，不会自动重试。请先在 `Lark: 设置飞书链接` 里核对远端是否已有这个文件，再重试。确认没有创建远端文件的话，断开这条待确认记录后重新上传。
+
+### 忽略文件和文件夹
+
+想让部分笔记、PDF 或子文件夹不同步到飞书，用「同步忽略」页面：右键文件夹，选 `Lark: 选择忽略的文件`。「已发布文件」窗口、命令面板和 **设置 → 同步 → 同步忽略** 里也能进入。
+
+页面把这个文件夹显示成一棵树。取消勾选就是忽略，重新勾选就恢复同步。取消勾选整个文件夹，里面所有内容都会被忽略，包括之后新增的文件；只有部分内容被取消勾选的文件夹显示半选状态。「编辑规则文件」查看原始文本，「更换文件夹」切换文件夹，「清空规则」清空当前文件夹的规则。
+
+选择会保存到该文件夹里的 `.feishuignore`，也可以手写。语法和 `.gitignore` 相同：每行一条规则，支持 `*` 和 `**`，末尾加 `/` 只匹配文件夹，`!` 开头表示恢复同步，`#` 开头是注释。规则相对于文件所在的文件夹，越深层的文件优先级越高，库根目录的 `.feishuignore` 对整个库生效。它是普通文件，可以提交到 Git，也可以复制到别的库复用。
+
+```gitignore
+# Projects/Alpha/.feishuignore
+/Drafts/
+*.draft.md
+!/Drafts/keep.md
+```
+
+被忽略的内容会被目录同步、保存后同步和 `pre-push` 跳过。已经在飞书里的内容不会被删，只被已忽略笔记嵌入的图片也不会上传。手动同步单篇笔记不受影响。`.feishuignore` 读取失败时，同步会中止，不会在没有规则的情况下继续发布。Obsidian 的文件列表看不到以点开头的文件，请在这个页面或外部编辑器里修改。
+
+### 自动同步
+
+自动同步只更新已经绑定的笔记，不会发布新文件。先手动发布一次，再到 **设置 → 同步 → 自动同步方式** 里选择：
+
+| 方式 | 何时同步 | 说明 |
+| --- | --- | --- |
+| `关闭` | 只在手动同步时 | |
+| `保存后同步`（默认） | 已绑定笔记保存后约 15 秒（「保存后同步延迟」） | Obsidian 需要在运行。Obsidian 打开该库时，用其他编辑器修改也会触发。 |
+| `Git pre-push hook` | 每次 `git push` 之前 | 库必须是 Git 仓库，并在 **设置 → Git Hook** 里安装。不需要 Obsidian 在运行。同步失败时，这次 push 会被阻断。 |
+
+自动同步覆盖 Markdown 笔记和它们引用的图片、视频。PDF 需要手动同步或目录同步。被忽略的内容会跳过。
+
+### 已发布文件
+
+点左侧栏的纸飞机图标，或在命令面板运行「已发布文件」。每一行显示文件名和本地路径，「在飞书打开」打开远端文件。「更多」菜单有复制链接、打开本地文件、同步、设置链接和移除已保存链接（本地和飞书的文件都会保留）。
+
+旧版本在关闭 frontmatter 时没有记下链接。「查找已有链接」会按文件名在已关联的飞书目录里匹配，不会创建文件。匹配到多个时，请手动设置链接。
+
+---
+
+## 设置一览
+
+| 设置项 | 作用 | 默认值 |
+| --- | --- | --- |
+| `语言` | 设置、菜单和通知的显示语言（中文或 English） | 中文 |
+| `默认上传位置` | 新文档存放位置：Wiki URL、Wiki 节点 token 或文件夹 token。留空为个人文档库 | 留空 |
+| CLI 与授权 | 安装或升级 `lark-cli`、创建 CLI 应用、登录或退出、设置路径。见[第 2 步](#2-连接账号) | |
+| `网络代理` | 继承系统环境变量、自定义 HTTP 代理或不使用代理 | 继承系统环境变量 |
+| `标题来源` | 第一个 Markdown 标题，或文件名 | 文件名 |
+| `写入 frontmatter 绑定信息` | 额外把链接写成 `lark_doc_url`。插件数据中的绑定始终保留 | 关闭 |
+| `同步后打开文档` | 发布或同步成功后在浏览器中打开文档 | 开启 |
+| `同步策略` | `自动（推荐）`：小改动只更新变动的块，较大或较复杂的改动改为全量覆盖。`安全增量同步`：从不覆盖，不适合增量时报错。`全量覆盖同步`：每次都重写远端文档 | 自动 |
+| `自动同步方式` | `关闭`、`保存后同步` 或 `Git pre-push hook`。见[自动同步](#自动同步) | 保存后同步 |
+| `保存后同步延迟` | 保存后等待的秒数，把连续编辑合并成一次同步 | 15 |
+| `同步忽略` | 打开[「同步忽略」页面](#忽略文件和文件夹) | |
+| `删除本地已不存在的飞书文件` | 目录同步后，提示删除本地文件已不存在的远端文件 | 关闭 |
+| `同步状态缓存` | 为增量同步保留多少篇文档的状态 | 100 |
+| `安装 hook` | 把 `pre-push` hook 安装到库的 `.git/hooks` | |
+
+---
+
+## 同步原理
+
+插件把 Markdown 拆成顶层块，并记录它们在飞书 / Lark 里的 block id。之后的同步只更新变化的块，比如替换、插入或删除一个段落，飞书 / Lark 因此能保留对应的历史。只有选择覆盖，或自动策略判断改动太大、太复杂时，才会重写整篇远端文档。
+
+![远端历史](./docs/images/lark-history.png)
+
+本地 Markdown 是内容来源。远端文档被人手动改过的话，请先把改动合并回本地 Markdown，否则之后的同步可能会把它们替换掉。
+
+插件数据放在 `.obsidian/plugins/feishu-docs-publisher/`。`data.json` 保存设置、绑定和待确认记录，不受缓存裁剪影响。`lark-sync-state.json` 保存增量同步状态。
+
+---
+
+## 常见问题
+
+| 现象 | 检查什么 |
+| --- | --- |
+| 新文档标题是 `Untitled`，或同步立刻报错 | `lark-cli` 版本过低，到 **设置 → CLI 与授权** 升级。 |
+| 找不到 `lark-cli` | 点「重新检测」，或在「lark-cli 路径」里填绝对路径。没有 npm 的话先装 Node.js。 |
+| 安装或同步时连不上网络 | 检查「网络代理」。 |
+| 提示「默认上传位置无效或无法访问」 | 「默认上传位置」必须是你的账号能打开的 Wiki URL、Wiki 节点 token 或文件夹 token。 |
+| 自动同步没反应 | 笔记必须先发布过。另外确认「自动同步方式」不是 `关闭`，选「保存后同步」时 Obsidian 在运行，且笔记没有被 `.feishuignore` 跳过。 |
+| `git push` 被阻断 | `pre-push` 里的同步失败了。处理它报的错误，或把「自动同步方式」改成别的选项。 |
+
+---
+
+## 从 Feishu Lark CLI Sync 迁移
+
+插件 ID 从 `feishu-lark-cli-sync` 改成了 `feishu-docs-publisher`，所以 Obsidian 会用新的数据目录。桌面端启动时，如果 `.obsidian/plugins/feishu-docs-publisher/data.json` 还不存在，插件会把旧目录 `.obsidian/plugins/feishu-lark-cli-sync/` 里的 `data.json` 和 `lark-sync-state.json` 复制过来（有才复制）。旧目录保持原样。
+
+1. 启用本插件，并禁用已归档的旧插件，避免两个插件同步同一批笔记。
+2. 用 `pre-push` hook 的话，请打开一次 Obsidian。hook 由本插件或旧插件安装过时，这会刷新 hook 脚本。设置页里 Git Hook 状态不是已安装的话，请重新安装。hook 在新目录有 `data.json` 时读新目录，否则读旧目录。
+
+想在打开 Obsidian 之前就把文件放好：
+
+```bash
+mkdir -p "/path/to/your/vault/.obsidian/plugins/feishu-docs-publisher"
+cp "/path/to/your/vault/.obsidian/plugins/feishu-lark-cli-sync/data.json" \
+  "/path/to/your/vault/.obsidian/plugins/feishu-docs-publisher/data.json"
+cp "/path/to/your/vault/.obsidian/plugins/feishu-lark-cli-sync/lark-sync-state.json" \
+  "/path/to/your/vault/.obsidian/plugins/feishu-docs-publisher/lark-sync-state.json"
+```
+
+不存在的文件可以跳过，新目录里已有的文件不会被覆盖。
 
 ---
 
@@ -18,269 +271,11 @@
 
 ## 来源与致谢
 
-本项目基于 [wanghuan9/obsidian-feishu-lark-cli-sync](https://github.com/wanghuan9/obsidian-feishu-lark-cli-sync)（作者 huan.wang，GitHub 用户 wanghuan）按 MIT 许可证派生。原仓库和原作者的 GitHub 账号已不可用。原插件「Feishu Lark CLI Sync」已在 Obsidian 社区插件目录中归档。本项目从 0.1.26 继续开发，由 [totok22](https://github.com/totok22) 维护，并增加了已发布链接管理、PDF 同步与去重等相关能力，插件 ID 改为 `feishu-docs-publisher`。本项目与原作者没有官方隶属关系。它与 [zktww/feishu-lark-sync](https://github.com/zktww/feishu-lark-sync)（「Feishu Lark Sync」）无关，后者是独立代码库。原作者版权保留在 `LICENSE` 中。
+本项目基于 [wanghuan9/obsidian-feishu-lark-cli-sync](https://github.com/wanghuan9/obsidian-feishu-lark-cli-sync)（作者 huan.wang，GitHub 用户 wanghuan）按 MIT 许可证派生。原仓库和原作者的 GitHub 账号已不可用，原插件「Feishu Lark CLI Sync」也已在 Obsidian 社区插件目录中归档。本项目从 0.1.26 继续开发，插件 ID 改为 `feishu-docs-publisher`，由 [totok22](https://github.com/totok22) 维护，新增了已发布链接管理、PDF 同步与去重等能力和相关同步修复。本项目与原作者没有官方隶属关系，也与 [zktww/feishu-lark-sync](https://github.com/zktww/feishu-lark-sync)（「Feishu Lark Sync」）无关，后者是独立代码库。原作者版权保留在 `LICENSE` 中。
 
 ---
 
-## 从 Feishu Lark CLI Sync 迁移
-
-插件 ID 从 `feishu-lark-cli-sync` 改为 `feishu-docs-publisher`，因此 Obsidian 会把数据放在新目录。桌面端启动时，如果 `.obsidian/plugins/feishu-docs-publisher/data.json` 还不存在，插件会在旧目录 `.obsidian/plugins/feishu-lark-cli-sync/` 中找到 `data.json` 和 `lark-sync-state.json` 时把它们复制过来。旧目录保持原样，不会被删除或修改。
-
-启用新插件后，请禁用已归档的旧插件，避免两份数据同时同步同一批笔记。
-
-Git `pre-push` hook 在新目录已有 `data.json` 时读取新目录，否则回退到旧目录。用本插件或其前身安装过 hook 时，打开一次 Obsidian 会刷新 hook 辅助脚本。如果设置页里的 Git Hook 状态不是已安装，请在设置中重新安装 hook。
-
-如果希望在打开 Obsidian 之前就放好文件：
-
-```bash
-mkdir -p "/path/to/your/vault/.obsidian/plugins/feishu-docs-publisher"
-cp "/path/to/your/vault/.obsidian/plugins/feishu-lark-cli-sync/data.json" \
-  "/path/to/your/vault/.obsidian/plugins/feishu-docs-publisher/data.json"
-cp "/path/to/your/vault/.obsidian/plugins/feishu-lark-cli-sync/lark-sync-state.json" \
-  "/path/to/your/vault/.obsidian/plugins/feishu-docs-publisher/lark-sync-state.json"
-```
-
-不存在的文件可以跳过。新目录里已经存在的文件不会被覆盖。
-
----
-
-## 安装方法
-
-需要 Obsidian 1.13.0 或更高版本的桌面端。
-
-### 方式一：社区插件
-
-审核上架后：
-
-1. 打开 **设置 → 社区插件**。
-2. 关闭安全模式，点击「浏览」。
-3. 搜索 `Feishu Docs Publisher`，点击「安装」并「启用」。
-
-### 方式二：从 Release 手动安装
-
-1. 从 [GitHub Releases](https://github.com/totok22/feishu-docs-publisher/releases) 下载 `main.js`、`manifest.json` 和 `styles.css`。
-2. 在库中创建 `.obsidian/plugins/feishu-docs-publisher/`。
-3. 把这三个文件放入该目录。
-4. 重新加载社区插件并启用 **Feishu Docs Publisher**。
-
-Git hook 脚本已嵌入 `main.js`，安装 hook 时会写入 `.git/hooks`。通过社区插件或 Release 安装时，插件目录不需要额外的脚本文件。
-
-### 方式三：从源码构建
-
-```bash
-git clone https://github.com/totok22/feishu-docs-publisher.git
-cd feishu-docs-publisher
-npm install
-npm run build
-./install.sh "/path/to/your/vault"
-```
-
-安装脚本会把构建结果复制到 `.obsidian/plugins/feishu-docs-publisher/`。如果该库已经安装过本插件的 hook，脚本会刷新 hook 辅助脚本。重启 Obsidian 后启用 **Feishu Docs Publisher**。
-
-启用后按下一节的「首次使用」在插件设置中安装、配置并登录 `lark-cli`，不需要在终端执行依赖安装命令。
-
-GitHub 仓库名和库内插件目录都是 `feishu-docs-publisher`。
-
----
-
-## 首次使用
-
-首次使用时不需要打开终端。打开 Obsidian 设置中的 **Feishu Docs Publisher → CLI 与授权**，按页面状态操作：
-
-1. 如果未找到 npm，点击「下载 Node.js」，完成 Node.js 安装后回到设置页点击「重新检测」。
-2. 点击「安装 lark-cli」。以后有更新时，同一位置会显示版本并可升级。
-3. 首次使用且未配置 CLI 应用时，在「CLI 应用配置」选择飞书或 Lark，点击「创建应用」，在浏览器完成官方创建流程。
-4. 点击「登录 / 重新授权」，在浏览器确认所需权限。成功后会显示当前登录用户；需要切换账号时，先「退出登录」再重新授权。
-
-插件要求 `lark-cli > 1.0.53`。版本过低可能导致新建文档标题为 `Untitled`，或在同步时报错；设置页会直接提示并允许升级。
-
-如果自动探测不到可执行文件，可在「lark-cli 路径」中填写绝对路径。设置页还会显示 npm 与 CLI 的版本、最新版本和登录状态。
-
-### 网络代理
-
-设置中的「网络代理」有三档：
-
-- **继承系统环境变量（推荐）**：沿用当前环境的 `HTTPS_PROXY`、`HTTP_PROXY` 或 `ALL_PROXY`。
-- **使用自定义 HTTP 代理**：填写主机和端口，例如 `127.0.0.1` 和 `7890`。
-- **不使用代理**：插件启动的 CLI 和 npm 子进程会忽略代理环境变量。
-
-代理设置只作用于本插件启动的 `lark-cli`、npm 以及 Git `pre-push` hook 中的同步进程，不修改操作系统或 `lark-cli` 的全局配置。插件不会把代理用户名或密码写入插件数据。
-
----
-
-## 使用
-
-### 单篇同步
-
-Markdown、PDF 和文件夹的右键菜单提供四个入口：
-
-- `Lark: 同步到飞书`：同步当前笔记、PDF 或目录；没有绑定时首次发布。
-- `Lark: 覆盖同步到飞书`：按本地内容覆盖，并清理对应远端父目录中的其他同名文档。
-- `Lark: 设置飞书链接`：绑定已有的飞书文档、PDF 或目录。
-- `Lark: 打开飞书链接`：打开已绑定的远端页面；没有链接时不可用。
-
-命令面板中的「覆盖同步到飞书」执行相同的单篇覆盖操作。一个远端文件只能绑定一个本地文件。设置链接、恢复绑定和同步前都会检查冲突；已有共享绑定时，需要先改成互不冲突的链接。
-
-手动覆盖会保留已绑定文档。没有绑定时，会从同名文档中选择一个固定目标，先保存绑定并确认本地内容已写入，再删除同一远端父目录中的其他同名文档。普通同步、保存后同步和 Git hook 不会删除同名文档。已被另一个本地文件绑定的远端文档也不会被删除。
-
-如果待删除的 Wiki 文档还有子页面，插件会先把子页面移到保留文档下。目录覆盖会递归覆盖 Markdown 和 PDF，并把目录文档正文重置为原生子页面列表。同级笔记如果使用相同文档标题，覆盖会停止并提示修改标题。
-
-![操作入口](./docs/images/obsidian-actions.png)
-
-同步方向是单向的：Obsidian Markdown 是源内容，飞书 / Lark 文档是输出结果。
-
-绑定保存在插件数据中。开启「写入 frontmatter 绑定信息」时，还会写入以下可选字段：
-
-```yaml
----
-lark_doc_url: "https://example.feishu.cn/docx/xxxx"
----
-```
-
-### 本地图片
-
-```md
-![[diagram.png]]
-![[diagram.png|600]]
-![[diagram.png|600x400]]
-![架构图](../assets/diagram.png)
-```
-
-支持 PNG、JPEG/JPG、GIF、WebP 和 BMP。图片必须位于当前库内。HTTP(S) 图片仍由 Markdown 导入处理。保存后同步和 Git pre-push 会在图片文件单独变化时，同步引用它的已绑定笔记。
-
-### 本地视频
-
-用 `![[clip.mp4]]` 或 `![演示](../assets/clip.mp4)` 嵌入当前库内的视频。支持 MP4、M4V、MOV 和 WebM，上传后显示为飞书 / Lark 的文件预览块。能否播放取决于编码和客户端；已实测 H.264/AAC 的 MP4 和 MOV。再次同步或修改附近正文时，会复用未变化的视频。保存后同步和 Git pre-push 也会检测被引用视频文件的变化。普通链接和远程视频地址不会上传。
-
-### 目录同步
-
-在目录上右键，选择 `Lark: 同步到飞书`。插件会创建对应的远端层级，同步 Markdown 和 PDF，并把上传正文中的 Markdown 内部链接改写成远端文档引用。
-
-没有被任何笔记引用的图片不会出现在飞书里，所以目录同步会把它们收集到一篇自动生成的 `<目录名> 图片.md` 中。这篇笔记与图片放在同一目录，用 `![[路径]]` 嵌入每张未引用的图片，并和其他笔记一样发布。已被笔记嵌入的图片会跳过。之后再次同步目录时，笔记会随图片的新增、删除或被引用而刷新。可以重命名这篇笔记，插件靠第一行的隐藏注释识别它。
-
-在设置中打开「删除本地已不存在的飞书文件」（默认关闭），目录同步还会清理你在本地删除或移走的文件。目录同步成功后，插件会列出该目录下由它发布、但本地文件已不存在的飞书文档和 PDF，你确认后才会删除。只处理有发布记录的文件，你在飞书里手动创建的文档不会被删。在 Obsidian 之外移动的笔记，只要还有现存笔记指向同一篇远端文档就会保留；下面还有子页面的 Wiki 文档会跳过。本地一侧靠 Git 历史兜底，插件无法恢复已删除的远端文件。
-
-目标是 Wiki（`/wiki/...`）或个人文档库时，每一级目录本身也是文档。插件会在各级目录文档中插入飞书 / Lark 原生子页面列表。列表中的文档链接由飞书 / Lark 维护；插件不生成这些链接，也不嵌入子文档正文。
-
-普通目录同步会复用已有列表，并保留目录页上的其他内容。目录覆盖会把目录页正文重置为原生子页面列表。Drive 目标（`/drive/folder/...`）使用普通文件夹，不插入列表。
-
-支持的链接形式：
-
-```md
-详细设计见 02-database.md。
-[组件设计](03-components.md#section)
-[[04-api|接口设计]]
-```
-
-本地笔记不会因为链接改写而被修改。
-
-### 忽略文件和文件夹
-
-想让同步文件夹里的部分笔记、PDF 或子文件夹不同步到飞书，把它们写进该文件夹里的 `.feishuignore` 文件。写法和 `.gitignore` 一样：每行一条规则，支持 `*`、`**` 通配符，末尾加 `/` 只匹配文件夹，`!` 开头表示恢复同步，`#` 开头是注释。规则相对于这个文件所在的文件夹，越深层的文件优先级越高（库根目录的 `.feishuignore` 对整个库生效）。它就是一个普通文件，可以手写、提交到 Git，或复制到别的文件夹、别的库里复用。
-
-```gitignore
-# Projects/Alpha/.feishuignore
-/Drafts/
-*.draft.md
-!/Drafts/keep.md
-```
-
-也可以不手写，直接用「同步忽略」页面：右键文件夹选择「Lark: 选择忽略的文件」，或在「已发布文件」窗口、命令面板、插件设置里进入，再选择要同步的文件夹。页面只显示这个文件夹，并用一棵树列出里面的内容，取消勾选某个文件或子文件夹即可忽略，重新勾选就恢复同步。文件夹里只有部分内容被取消勾选时会显示半选状态；取消勾选整个子文件夹，则里面所有内容（包括之后新增的文件）都会被忽略。页面会把对应的规则写进该文件夹的 `.feishuignore`；「编辑规则文件」可以查看和修改原始文本，「更换文件夹」切换到另一个文件夹，「清空规则」清空当前文件夹的规则文件。
-
-被忽略的内容会被目录同步、保存时自动同步和 Git pre-push 跳过。已经在飞书里的内容不会被删除，只被已忽略笔记嵌入的图片也不会上传。用命令或文件菜单手动同步单篇笔记仍然可用。如果 `.feishuignore` 读取失败，同步会中止，而不是在没有规则的情况下继续发布。Obsidian 的文件列表不显示以点开头的文件，请用这个页面或外部编辑器修改它。
-
-### 已发布文件
-
-点击左侧纸飞机图标，或使用命令面板，打开「已发布文件」。复制链接和查看记录都在这个窗口中。
-
-每一行显示文件名和本地路径。使用「在飞书打开」查看文件。「更多」菜单提供复制链接、打开本地文件、同步、设置链接和移除已保存链接。移除记录后，本地文件和飞书文件都会保留。
-
-旧版本在关闭 frontmatter 时可能没有记下链接。使用「查找已有链接」，按文件名在已关联的飞书目录中匹配。多个同名文件需要手动设置链接。此操作不会创建飞书文件。
-
-### PDF 文件
-
-目录同步把 PDF 作为原生文件上传到对应的 Drive 文件夹或知识库节点。PDF 右键也可以单独上传；默认目标为空时，单个 PDF 上传到 Drive 根目录。
-
-支持的 PDF 引用：
-
-```md
-[[规格书/报告.pdf]]
-![[规格书/报告.pdf]]
-[[报告.pdf|查看规格书]]
-![[报告.pdf#page=2]]
-[查看规格书](规格书/报告.pdf)
-```
-
-PDF 上传成功后，目录同步会把这些引用改写成飞书 / Lark 原生文件引用。单篇首次发布、手动同步和保存后同步也会复用已有 PDF 绑定。PDF 不在当前同步目录中时，请先单独上传，或在同步笔记前绑定已有远端 URL。本地双链和嵌入保持原样。
-
-飞书 / Lark 显示远端 PDF 文件名。别名、页码和预览尺寸不会保留；嵌入也会变成可点击的文件引用。PDF 不会转换成 Docx，也不会在正文中展开预览。未发布、待确认、缺失和代码示例中的引用保持原文。同名文件按 Obsidian 的链接解析结果处理。
-
-Git hook 也会复用 PDF 绑定，并按库路径或相对笔记的路径改写引用。其他目录中的短文件名需要 Obsidian 解析；使用 hook 时请写上路径。
-
-持久绑定和内容哈希会跳过未变化的 PDF。内容变化时覆盖同一个 file token，链接保持不变。本地重命名会迁移关联，远端文件名保持原样。PDF 通过手动操作或目录同步更新；保存后同步和 Git hook 仍只处理 Markdown 及其引用的图片和视频。
-
-手动覆盖 PDF 时，即使本地文件未变化，也会覆盖同一个远端文件。没有绑定时会先复用同名文件；上传成功后再删除该远端父目录中的其他同名 PDF。
-
-上传超时会保留待确认记录，并停止盲目重试。请先在绑定编辑器中核对已有远端文件，再重试。如果确认没有创建远端文件，可以断开待确认记录后重新上传。
-
-### 自动同步
-
-自动同步只处理已经绑定的文档。请先用 `Lark: 同步到飞书` 发布一次并保存绑定，之后的保存后同步或 Git hook 才能更新该文件。是否写入 frontmatter 不影响绑定。
-
-#### 触发方式
-
-- `关闭`：只手动同步。
-- `保存后同步`：Obsidian 运行期间，已绑定的 Markdown 在保存后同步。
-- `Git pre-push hook`：执行 `git push` 前同步已绑定的 Markdown。
-
-「保存后同步」依赖 Obsidian 收到文件变更事件。在 Obsidian 内编辑，或在 Obsidian 打开该库时用其他编辑器修改，都会触发。Obsidian 关闭时不会触发。
-
-「Git pre-push hook」只依赖 `git push`。在设置页的 `Git Hook` 区域安装。同步失败时，本次 `git push` 会被阻断。
-
----
-
-## 设置
-
-- `CLI 与授权`：安装或升级 `lark-cli`、创建 CLI 应用、登录/重新授权、退出登录和查看版本状态。
-- `网络代理`：选择系统代理、自定义 HTTP 主机与端口，或关闭代理。
-- `默认上传位置`：Wiki URL、Wiki 节点 token、文件夹 token；留空则上传到个人文档库。
-- `标题来源`：使用第一个 Markdown 标题，或使用文件名。
-- `写入 frontmatter 绑定信息`：额外把远端 URL 写入笔记 frontmatter。插件数据中的绑定始终保留。
-- `同步策略`：默认自动。小改动增量同步；较大、较复杂或不适合增量的改动会全量覆盖。
-- `同步状态缓存`：为精确同步保留多少篇文档的状态。
-
-## 增量同步与远端历史
-
-插件把 Markdown 拆成顶层块，并记录它们在飞书 / Lark 中的 block id。之后的同步会更新发生变化的块，例如替换、插入或删除段落，而不重写整篇文档，因此飞书 / Lark 可以保留对应历史。选择覆盖时，或自动策略判断改动过大、过复杂时，才会重写远端文档。
-
-![远端历史](./docs/images/lark-history.png)
-
-发布绑定和待确认记录保存在 `.obsidian/plugins/feishu-docs-publisher/data.json`，不会随同步状态缓存裁剪而丢失。
-
-精确同步状态保存在：
-
-```text
-.obsidian/plugins/feishu-docs-publisher/lark-sync-state.json
-```
-
-## 说明
-
-- 自动同步只处理已绑定笔记，不会发布未绑定文件。
-- 如果远端文档被手动修改过，请先把这些修改合并回本地 Markdown。本地 Markdown 是内容来源。
-
-## 变更记录与发布
-
-完整版本历史见 [CHANGELOG.md](./CHANGELOG.md)。每个 GitHub Release 的正文来自 [`release-notes/`](./release-notes/) 中同版本的文件。
-
-发布新版本时：
-
-1. 在 `CHANGELOG.md` 中加入该版本，并创建 `release-notes/<版本>.md`，文件第一行必须是 `# <版本>`。
-2. 运行 `npm version <版本> --no-git-tag-version`。这会更新 `package.json`、`package-lock.json`、`manifest.json` 和 `versions.json`。
-3. 运行 `npm run check` 和 `npm run release:check`。
-4. 提交并推送改动，然后推送与版本号完全一致、不带 `v` 前缀的标签，例如 `0.3.0`。
-5. `.github/workflows/release.yml` 会核对标签和发布说明，运行测试与生产构建，为三个插件文件生成构建证明，并用对应的发布说明创建草稿 Release。审核后发布该草稿。
-
-## 开发
+## 开发与发布
 
 ```bash
 npm install
@@ -288,7 +283,15 @@ npm test
 npm run build
 ```
 
-`npm test` 会做类型检查并运行测试。`npm run build` 生成 `main.js`，该文件已加入 `.gitignore`。`npm run check` 会依次运行测试和生产构建。
+`npm test` 做类型检查并运行测试。`npm run build` 生成 `main.js`，该文件已加入 `.gitignore`。`npm run check` 两者都跑。
+
+版本历史见 [CHANGELOG.md](./CHANGELOG.md)，每个 GitHub Release 的正文来自 [`release-notes/`](./release-notes/) 里同版本的文件。发布新版本的步骤：
+
+1. 在 `CHANGELOG.md` 里加上该版本，并创建 `release-notes/<版本>.md`，第一行必须是 `# <版本>`。
+2. 运行 `npm version <版本> --no-git-tag-version`，它会更新 `package.json`、`package-lock.json`、`manifest.json` 和 `versions.json`。
+3. 运行 `npm run check` 和 `npm run release:check`。
+4. 提交并推送，然后推送与版本号完全一致、不带 `v` 前缀的标签，例如 `0.3.0`。
+5. `.github/workflows/release.yml` 会核对标签和发布说明，运行测试与生产构建，为三个插件文件生成构建证明，并创建草稿 Release。审核后发布。
 
 ## 许可
 
