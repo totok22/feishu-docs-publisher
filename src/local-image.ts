@@ -63,7 +63,7 @@ export class LocalImageError extends Error {
 	readonly imageReference: string;
 
 	constructor(reason: string, markdownPath: string, imageReference: string, detail: string) {
-		super(`${detail}（文档：${markdownPath}，图片：${imageReference}）`);
+		super(`${detail}（文档：${markdownPath}，引用：${imageReference}）`);
 		this.reason = reason;
 		this.markdownPath = markdownPath;
 		this.imageReference = imageReference;
@@ -131,22 +131,24 @@ export async function prepareLocalImages(input: PrepareLocalImagesInput): Promis
 
 export function scanLocalImageReferences(content: string): LocalImageReference[] {
 	const references: LocalImageReference[] = [];
+	const protectedVideoRanges = collectProtectedVideoRanges(content);
 	let offset = 0;
 	let fenceMarker = "";
 	while (offset <= content.length) {
 		const nextLineBreak = content.indexOf("\n", offset);
 		const rawLine = content.slice(offset, nextLineBreak < 0 ? content.length : nextLineBreak);
 		const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
-		const fenceMatch = line.match(/^\s{0,3}(```+|~~~+)/);
+		const fenceMatch = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
 		if (fenceMatch?.[1]) {
-			const marker = fenceMatch[1].slice(0, 3);
-			if (!fenceMarker) {
+			const marker = fenceMatch[1];
+			if (!fenceMarker && !(marker[0] === "`" && fenceMatch[2]?.includes("`"))) {
 				fenceMarker = marker;
-			} else if (fenceMarker === marker) {
+			} else if (fenceMarker[0] === marker[0] && marker.length >= fenceMarker.length
+				&& !fenceMatch[2]?.trim()) {
 				fenceMarker = "";
 			}
 		} else if (!fenceMarker) {
-			references.push(...scanLineImageReferences(line, offset));
+			references.push(...scanLineImageReferences(line, offset, protectedVideoRanges));
 		}
 		if (nextLineBreak < 0) {
 			break;
@@ -222,7 +224,11 @@ export function isSupportedLocalMediaPath(path: string): boolean {
 	return isSupportedImagePath(path) || isSupportedVideoPath(path);
 }
 
-function scanLineImageReferences(line: string, lineOffset: number): LocalImageReference[] {
+function scanLineImageReferences(
+	line: string,
+	lineOffset: number,
+	protectedVideoRanges: Array<{ start: number; end: number }>
+): LocalImageReference[] {
 	const references: LocalImageReference[] = [];
 	const occupiedRanges: Array<{ start: number; end: number }> = [];
 	const wikiPattern = /!\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g;
@@ -231,12 +237,13 @@ function scanLineImageReferences(line: string, lineOffset: number): LocalImageRe
 		const sourceSyntax = wikiMatch[0] || "";
 		const target = (wikiMatch[1] || "").trim();
 		const video = isLocalVideoTarget(target);
+		const start = lineOffset + wikiMatch.index;
 		if (!target || (!isSupportedImagePath(stripQueryAndFragment(target)) && !video)
-			|| (video && isCodeOrEscaped(line, wikiMatch.index))) {
+			|| (video && (isEscaped(line, wikiMatch.index)
+				|| protectedVideoRanges.some((range) => start >= range.start && start < range.end)))) {
 			continue;
 		}
 		const dimensions = parseWikiImageAlias(wikiMatch[2] || "");
-		const start = lineOffset + wikiMatch.index;
 		const end = start + sourceSyntax.length;
 		references.push({
 			sourceSyntax,
@@ -260,12 +267,13 @@ function scanLineImageReferences(line: string, lineOffset: number): LocalImageRe
 		}
 		const rawTarget = (markdownMatch[2] || "").replace(/^<|>$/g, "");
 		const video = isLocalVideoTarget(rawTarget);
+		const start = lineOffset + relativeStart;
 		if (/^https?:\/\//i.test(rawTarget) || (!isSupportedImagePath(stripQueryAndFragment(rawTarget)) && !video)
-			|| (video && isCodeOrEscaped(line, relativeStart))) {
+			|| (video && (isEscaped(line, relativeStart)
+				|| protectedVideoRanges.some((range) => start >= range.start && start < range.end)))) {
 			continue;
 		}
 		const sourceSyntax = markdownMatch[0] || "";
-		const start = lineOffset + relativeStart;
 		references.push({
 			sourceSyntax,
 			target: rawTarget,
@@ -282,26 +290,40 @@ function isLocalVideoTarget(target: string): boolean {
 		&& isSupportedVideoPath(decodeImageTarget(target));
 }
 
-function isCodeOrEscaped(line: string, index: number): boolean {
+function isEscaped(line: string, index: number): boolean {
 	let backslashes = 0;
 	for (let offset = index - 1; offset >= 0 && line[offset] === "\\"; offset -= 1) {
 		backslashes += 1;
 	}
-	if (backslashes % 2 === 1) return true;
-	const backtickRuns = [...line.matchAll(/`+/g)];
-	for (let opening = 0; opening < backtickRuns.length; opening += 1) {
-		const start = backtickRuns[opening];
-		if (!start) continue;
-		let closing = opening + 1;
-		while (closing < backtickRuns.length && backtickRuns[closing]?.[0].length !== start[0].length) {
-			closing += 1;
+	return backslashes % 2 === 1;
+}
+
+function collectProtectedVideoRanges(content: string): Array<{ start: number; end: number }> {
+	const ranges: Array<{ start: number; end: number }> = [];
+	// Match whole blocks/comments before looking for inline delimiters, so their
+	// contents cannot open a code span or close a fence in the surrounding text.
+	const tokens = /^ {0,3}(`{3,})[^\n]*\n[\s\S]*?(?:^ {0,3}\1`*[ \t]*(?=\r?$)|$(?![\s\S]))|^ {0,3}(~{3,})[^\n]*\n[\s\S]*?(?:^ {0,3}\2~*[ \t]*(?=\r?$)|$(?![\s\S]))|<!--[\s\S]*?(?:-->|$(?![\s\S]))|^(?: {4}|\t)[^\r\n]*|`+/gm;
+	let token: RegExpExecArray | null;
+	while ((token = tokens.exec(content))) {
+		const start = token.index;
+		if (!/^`+$/.test(token[0])) {
+			ranges.push({ start, end: tokens.lastIndex });
+			continue;
 		}
-		const end = backtickRuns[closing];
-		if (!end) continue;
-		if (index >= start.index && index < end.index + end[0].length) return true;
-		opening = closing;
+		if (isEscaped(content, start)) continue;
+		const closingRuns = /`+/g;
+		closingRuns.lastIndex = tokens.lastIndex;
+		let closing: RegExpExecArray | null;
+		while ((closing = closingRuns.exec(content))) {
+			// An inline code span cannot cross a paragraph boundary.
+			if (/\r?\n[ \t]*\r?\n/.test(content.slice(tokens.lastIndex, closing.index))) break;
+			if (closing[0].length !== token[0].length) continue;
+			ranges.push({ start, end: closingRuns.lastIndex });
+			tokens.lastIndex = closingRuns.lastIndex;
+			break;
+		}
 	}
-	return false;
+	return ranges;
 }
 
 function parseWikiImageAlias(alias: string): { width?: number; height?: number; alt?: string } {
@@ -323,12 +345,12 @@ function resolveLocalImageVaultPath(
 ): string | null {
 	const decodedTarget = decodeImageTarget(target);
 	if (!decodedTarget || isAbsolute(decodedTarget) || /^[A-Za-z]:[\\/]/.test(decodedTarget)) {
-		throw new LocalImageError("image-outside-vault", markdownPath, target, "图片路径必须位于 Obsidian vault 内");
+		throw new LocalImageError("image-outside-vault", markdownPath, target, "媒体路径必须位于 Obsidian vault 内");
 	}
 	const rootCandidate = normalizePathInsideVault(decodedTarget);
 	const relativeCandidate = normalizePathInsideVault(join(dirname(markdownPath), decodedTarget));
 	if (!relativeCandidate) {
-		throw new LocalImageError("image-outside-vault", markdownPath, target, "图片路径必须位于 Obsidian vault 内");
+		throw new LocalImageError("image-outside-vault", markdownPath, target, "媒体路径必须位于 Obsidian vault 内");
 	}
 	const exactCandidates = [relativeCandidate, rootCandidate].filter((candidate): candidate is string => Boolean(candidate))
 		.filter((candidate, index, candidates) => {
@@ -338,7 +360,7 @@ function resolveLocalImageVaultPath(
 		return exactCandidates[0] || null;
 	}
 	if (exactCandidates.length > 1) {
-		throw new LocalImageError("image-path-ambiguous", markdownPath, target, "本地图片引用存在歧义");
+		throw new LocalImageError("image-path-ambiguous", markdownPath, target, "本地媒体引用存在歧义");
 	}
 
 	const basenameMatches = imageIndex.pathsByBasename.get(basename(decodedTarget.replace(/\\/g, "/"))) || [];
@@ -346,7 +368,7 @@ function resolveLocalImageVaultPath(
 		return basenameMatches[0] || null;
 	}
 	if (basenameMatches.length > 1) {
-		throw new LocalImageError("image-path-ambiguous", markdownPath, target, "存在多个同名本地图片，请使用明确路径");
+		throw new LocalImageError("image-path-ambiguous", markdownPath, target, "存在多个同名本地媒体，请使用明确路径");
 	}
 	return null;
 }
@@ -362,7 +384,7 @@ async function readLocalImage(
 	const absolutePath = await realpath(resolve(absoluteRoot, vaultPath));
 	if (!isPathInsideRoot(absoluteRoot, absolutePath)) {
 		throw new LocalImageError("image-outside-vault", markdownPath, reference.sourceSyntax,
-			"图片解析结果位于 Obsidian vault 外");
+			"媒体解析结果位于 Obsidian vault 外");
 	}
 	if (isSupportedVideoPath(vaultPath)) {
 		return readLocalVideo(absolutePath, markdownPath, reference, vaultPath, occurrenceIndex);

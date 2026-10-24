@@ -404,6 +404,42 @@ try {
 		"```"
 	].join("\n");
 	assert.equal(scanLocalImageReferences(videoMarkdown).length, 2);
+	for (const protectedMarkdown of [
+		"    ![[missing.mp4]]",
+		"\t![example](missing.mp4)",
+		"`example\n![[missing.mp4]]\n`",
+		"``example `\n![example](missing.mp4)\n``",
+		"<!-- ![[missing.mp4]] -->",
+		"<!--\n![example](missing.mp4)\n-->",
+		"<!-- ![[missing.mp4]]",
+		"````md\n```\n![[missing.mp4]]\n```\n````",
+		"~~~~md\n~~~\n![example](missing.mp4)\n~~~\n~~~~"
+	]) {
+		assert.deepEqual(scanLocalImageReferences(protectedMarkdown), [], protectedMarkdown);
+		assert.deepEqual(await prepareLocalImages({
+			vaultRoot: workspace, markdownPath: "notes/videos.md", content: protectedMarkdown
+		}), { content: protectedMarkdown, images: [] }, "examples must not require real video files");
+	}
+	const protectedExamples = [
+		"<!-- ![[missing.mp4]] --> ![[clip.mp4]]",
+		"",
+		"`example\n![[missing.mp4]]\n` ![real](../assets/clip.mp4)",
+		"",
+		"    ![[missing.mp4]]",
+		"",
+		"![[clip.mp4]]"
+	].join("\n");
+	const preparedExamples = await prepareLocalImages({
+		vaultRoot: workspace, markdownPath: "notes/videos.md", content: protectedExamples
+	});
+	assert.equal(preparedExamples.images.length, 3, "real embeds outside protected regions still upload");
+	assert.equal((preparedExamples.content.match(/!\[\[missing\.mp4\]\]/g) || []).length, 3);
+	assert.equal(scanLocalImageReferences("````md\n```\n![[missing.mp4]]\n````\n\n![[clip.mp4]]").length, 1,
+		"a shorter fence inside an example must not hide the real embed after the closing fence");
+	await writeFile(join(workspace, "notes", "protected.md"), "`example\n![[clip.mp4]]\n`\n\n<!-- ![[clip.mp4]] -->");
+	assert.deepEqual(await findReferencingMarkdownFiles({
+		vaultRoot: workspace, markdownPaths: ["notes/protected.md"], changedImagePaths: ["assets/clip.mp4"]
+	}), [], "a video change must not select notes that only mention it in examples");
 	assert.equal(isSupportedImagePath("clip.mp4"), false);
 	assert.equal(isSupportedVideoPath("clip.MP4"), true);
 	assert.equal(isSupportedLocalMediaPath("clip.webm"), true);
