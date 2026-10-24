@@ -18,6 +18,11 @@ import {
 	withDocsApiVersion
 } from "./lark-cli-command.mjs";
 import {
+	extractTitle,
+	preparePdfCropImages,
+	prepareNativeCallouts,
+	syncNativeDocument,
+	stripPreparedMarkdownTitle,
 	buildSyncPlan,
 	buildPublishedPdfTargets,
 	rewritePublishedPdfLinks,
@@ -322,12 +327,21 @@ function resolveDocumentGroupKey(task, syncState) {
 	return getDocumentStateKey(task.doc);
 }
 
+function nativeStateForTask(settings, task) {
+	for (const key of [task.canonicalToken, ...task.stateKeys, task.doc]) {
+		const state = key && settings.nativeCalloutStates?.[getDocumentStateKey(key)];
+		if (state) return state;
+	}
+	return undefined;
+}
+
 async function syncMarkdownTask(task, settings, syncState) {
 	try {
 		const file = { basename: basename(task.filePath, ".md") };
 		const normalizedContent = removeBindingOnlyFrontmatterBeforeNextFrontmatter(task.content);
-		const rawMarkdownForLark = prepareNoteContentForLark(file, removeLarkBinding(normalizedContent), settings.titleSource);
-		const markdownForLark = rewritePublishedPdfLinks(rawMarkdownForLark,
+		const rawMarkdownForLark = prepareNoteContentForLark(file, removeLarkBinding(normalizedContent), settings.titleSource, warning => console.warn(`[Feishu export] ${task.repoRelativePath}: ${warning}`), settings.nativeCalloutExport === true || !!nativeStateForTask(settings, task));
+		const pdfPrepared = await preparePdfCropImages({vaultRoot:task.vaultRoot,markdownPath:task.repoRelativePath,content:rawMarkdownForLark});
+		const markdownForLark = rewritePublishedPdfLinks(pdfPrepared.content,
 			buildPublishedPdfTargets(settings.pdfBindings, settings.disconnectedFolders),
 			{ path: task.repoRelativePath }, (target) => {
 				// Without Obsidian's metadata cache, accept only explicit vault/relative paths.
@@ -342,7 +356,41 @@ async function syncMarkdownTask(task, settings, syncState) {
 			markdownPath: task.repoRelativePath,
 			content: markdownForLark
 		});
+		preparedContent.images.push(...pdfPrepared.images);
 		const contentForLark = preparedContent.content;
+		if ((settings.nativeCalloutExport === true && /\[![\w-]+/.test(contentForLark) && prepareNativeCallouts(contentForLark).callouts.length)
+			|| nativeStateForTask(settings, task)) {
+			const remote = await fetchLarkDocumentWithIds(settings, task.doc);
+			const canonical = remote.doc || remote.content.match(/<title\b[^>]*\bid="([A-Za-z0-9_-]+)"/)?.[1] || task.canonicalToken;
+			await syncNativeDocument(canonical, stripPreparedMarkdownTitle(contentForLark), {
+				allowReplaceUntracked: settings.syncStrategy !== "precise",
+				labelColors: settings.researchLabelColors === true,
+				images:preparedContent.images,
+				uploadImage:async (blockId,image) => {
+					const result=await runLarkCli(settings,["docs","+media-upload","--as","user","--doc-id",canonical,"--parent-type","docx_image","--parent-node",blockId,"--file",`./${basename(image.absolutePath)}`,"--json"],dirname(image.absolutePath));
+					if (!result.data?.file_token) throw new Error("图片上传未返回 file_token");
+					return result.data.file_token;
+				},
+				api: async (method, path, body, params) => {
+					let result;
+					await withTempMarkdown("native-request", body === undefined ? "" : JSON.stringify(body), async file => {
+						const args = ["api", method, path, "--as", "user", "--json"];
+						if (body !== undefined) args.push("--data", `@${file.fileName}`);
+						if (params) args.push("--params", JSON.stringify(params));
+						result = await runLarkCli(settings, args, file.directory);
+					});
+					if (!result?.ok || !result.data) throw new Error("原生块操作返回异常");
+					return result.data;
+				},
+				save: async state => {
+					const aliases = Object.fromEntries([canonical, ...task.stateKeys].filter(Boolean).map(key => [getDocumentStateKey(key), state]));
+					settings.nativeCalloutStates = {...settings.nativeCalloutStates, ...aliases};
+					await writeSettingsUpdate(latest => ({ ...latest, nativeCalloutStates: { ...latest.nativeCalloutStates, ...aliases } }));
+				},
+				materialize: async () => { await materializeImagesForTask(settings, canonical, preparedContent.images.filter(image => image.mediaType === "video")); }
+			}, settings.nativeCalloutStates?.[canonical] || nativeStateForTask(settings, task), extractTitle(file, contentForLark, "first-heading"));
+			return;
+		}
 		const strategy = settings.syncStrategy || "auto";
 		let state = findDocumentState(syncState, task.stateKeys, task.canonicalToken);
 		let syncDoc = state?.doc || task.doc;
@@ -401,7 +449,7 @@ async function syncMarkdownTask(task, settings, syncState) {
 			throw error;
 		}
 		if (isRemoteDocumentDeletedApiError(error)) {
-			await unbindDeletedRemoteDocument(task, syncState);
+			await unbindDeletedRemoteDocument(task, settings, syncState);
 			throw new PrePushSyncError(formatDeletedRemoteUnboundMessage(settings, task.repoRelativePath));
 		}
 
@@ -416,18 +464,20 @@ async function syncMarkdownTask(task, settings, syncState) {
 	}
 }
 
-async function unbindDeletedRemoteDocument(task, syncState) {
+async function unbindDeletedRemoteDocument(task, settings, syncState) {
 	await writeSettingsUpdate((latestSettings) => {
 		const binding = readPersistedBinding(latestSettings, task.repoRelativePath);
-		if (!binding || binding.token !== task.binding.token || binding.url !== task.binding.url) {
+		if (binding && (binding.token !== task.binding.token || binding.url !== task.binding.url)) {
 			return latestSettings;
 		}
 		const documentBindings = { ...latestSettings.documentBindings };
 		delete documentBindings[task.repoRelativePath];
-		return { ...latestSettings, documentBindings };
+		return { ...latestSettings, documentBindings, disconnectedBindings: { ...latestSettings.disconnectedBindings, [task.repoRelativePath]: true } };
 	});
-	const unboundContent = removeLarkBindingFrontmatter(task.content);
-	await writeFile(task.filePath, unboundContent, "utf8");
+	if (settings.updateFrontmatter === true) {
+		const unboundContent = removeLarkBindingFrontmatter(task.content);
+		await writeFile(task.filePath, unboundContent, "utf8");
+	}
 	for (const key of getDocumentStateKeys(task.stateKeys)) {
 		deleteDocumentSyncStateKey(syncState, key);
 	}
@@ -435,10 +485,10 @@ async function unbindDeletedRemoteDocument(task, syncState) {
 
 function formatDeletedRemoteUnboundMessage(settings, path) {
 	if (readLanguage(settings) === "en") {
-		return `[Feishu Docs Publisher] remote Feishu/Lark document was deleted: ${path}\nBinding was removed automatically. Commit the change and push again.`;
+		return `[Feishu Docs Publisher] remote Feishu/Lark document was deleted: ${path}\nBinding was removed automatically. Review local changes, then push again.`;
 	}
 
-	return `[Feishu Docs Publisher] 飞书文档远端已删除：${path}\n已自动解绑，请提交变更后重新 push。`;
+	return `[Feishu Docs Publisher] 飞书文档远端已删除：${path}\n已自动解绑，请检查本地变更后重新 push。`;
 }
 
 function shouldRetryPlanWithRefreshedState(plan) {

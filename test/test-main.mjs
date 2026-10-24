@@ -21,6 +21,7 @@ await esbuild.build({
 			build.onLoad({ filter: /.*/, namespace: "obsidian-test-stub" }, () => ({
 				contents: `
 					export const addIcon = () => {};
+					export const loadPdfJs = async () => { throw new Error("PDF.js not stubbed"); };
 					export const setIcon = () => {};
 					export class ItemView {}
 					export class App {}
@@ -553,6 +554,7 @@ deletedRemotePlugin.getBinding = () => deletedRemoteBinding;
 deletedRemotePlugin.syncFileInternal = async () => {
 	throw new Error('{"code":3380003,"message":"Document page has been deleted"}');
 };
+deletedRemotePlugin.settings.updateFrontmatter = true;
 const deletedRemoteFrontmatter = {
 	lark_doc: "legacy",
 	lark_doc_url: deletedRemoteBinding.url,
@@ -1030,20 +1032,20 @@ pdfReferencePlugin.withTempMarkdown = async (_name, content, callback) => {
 pdfReferencePlugin.runLarkCli = async () => ({ok:true,data:{document:{document_id:canonicalBinding.token,url:canonicalBinding.url}}});
 pdfReferencePlugin.saveCreatedDocumentStateFromBaseline = async (_binding, content) => { firstPdfBaseline = content; };
 await pdfReferencePlugin.syncFileInternal(fakeNote, publishOptions);
-assert.equal(firstPdfContent, `${pdfCite}\n\n${pdfCite}`, "first publish converts PDFs even outside a published folder");
-assert.equal(firstPdfBaseline, `# Note\n\n${pdfCite}\n\n${pdfCite}`, "sync baseline uses the uploaded references");
+assert.equal(firstPdfContent, `${pdfCite}\n\nScan.pdf · p.2 ${pdfCite}`, "first publish converts PDFs even outside a published folder");
+assert.equal(firstPdfBaseline, `# Note\n\n${pdfCite}\n\nScan.pdf · p.2 ${pdfCite}`, "sync baseline uses the uploaded references");
 let nextPdfContent;
 pdfReferencePlugin.updateLarkDocument = async (_doc, prepared) => { nextPdfContent = prepared.content; return {}; };
 await pdfReferencePlugin.syncFileInternal(fakeNote, { ...publishOptions, mode: "save", allowCreate: false });
 assert.equal(nextPdfContent, firstPdfBaseline, "save sync preserves file references");
 pdfReferencePlugin.settings.pdfBindings["Root/Scan.pdf"].status = "pending";
-assert.equal(pdfReferencePlugin.rewritePublishedPdfReferences(fakeNote, pdfSource), pdfSource);
+assert.match(pdfReferencePlugin.rewritePublishedPdfReferences(fakeNote, pdfSource), /Scan.pdf · p\.2（PDF 未发布或未绑定）/);
 pdfReferencePlugin.settings.pdfBindings["Root/Scan.pdf"].status = "published";
 pdfReferencePlugin.settings.disconnectedFolders.Root = true;
-assert.equal(pdfReferencePlugin.rewritePublishedPdfReferences(fakeNote, pdfSource), pdfSource);
+assert.match(pdfReferencePlugin.rewritePublishedPdfReferences(fakeNote, pdfSource), /Scan.pdf · p\.2（PDF 未发布或未绑定）/);
 delete pdfReferencePlugin.settings.disconnectedFolders.Root;
 pdfReferencePlugin.app.metadataCache.getFirstLinkpathDest = () => ({ path: "Unpublished/Scan.pdf" });
-assert.equal(pdfReferencePlugin.rewritePublishedPdfReferences(fakeNote, "[[Scan.pdf]]"), "[[Scan.pdf]]");
+assert.equal(pdfReferencePlugin.rewritePublishedPdfReferences(fakeNote, "[[Scan.pdf]]"), "Scan.pdf（PDF 未发布或未绑定）");
 
 const deletedPdfRoot = await mkdtemp(join(tmpdir(), "lark-deleted-pdf-test-"));
 try {
@@ -2088,3 +2090,53 @@ try {
 }
 
 console.log("main plugin tests passed");
+
+// Native conversion is opt-in, and converted documents retain their native route.
+const nativePlugin = createPublishingPlugin();
+nativePlugin.settings.nativeCalloutExport = true;
+const nativeSource = '# Note\n\nMain\n\n> [!note]- Details\n> Body\n\nTail';
+nativePlugin.readNoteForLark = async () => ({content:nativeSource,images:[]});
+let nativeCalls=0,nativeCreates=0,initialNativeBody;
+nativePlugin.syncNativePreparedDocument = async (_doc,prepared) => {
+ nativeCalls++;assert.equal(prepared.content,nativeSource);
+ nativePlugin.settings.nativeCalloutStates = {[canonicalBinding.token]:{version:1,sourceHash:'native',units:[]}};
+};
+nativePlugin.withTempMarkdown = async (_name,content,callback) => {
+ initialNativeBody=content;return callback({directory:'/tmp',fileName:'native.md'});
+};
+nativePlugin.runLarkCli = async args => {
+ assert.ok(args.includes('+create'));nativeCreates++;
+ return {ok:true,data:{document:{document_id:canonicalBinding.token,url:canonicalBinding.url}}};
+};
+await nativePlugin.syncFileInternal(fakeNote,publishOptions);
+assert.equal(initialNativeBody,'');assert.equal(nativeCalls,1);
+nativePlugin.settings.nativeCalloutExport=false;
+await nativePlugin.syncFileInternal(fakeNote,{...publishOptions,allowCreate:false,mode:'save'});
+assert.equal(nativeCalls,2,'turning the setting off must not flatten existing native documents');
+assert.equal(nativeCreates,1);
+assert.equal(nativePlugin.hasNativeCallouts('```md\n> [!note]- Example\n```'),false);
+const defaultPlugin=createPlugin();defaultPlugin.loadData=async()=>null;await defaultPlugin.loadSettings();
+assert.equal(defaultPlugin.settings.nativeCalloutExport,false);
+assert.equal(defaultPlugin.settings.researchLabelColors,false);
+assert.equal(defaultPlugin.settings.updateFrontmatter,false);
+const classicPlugin=createPublishingPlugin();
+classicPlugin.app.vault.read=async()=>'> [!note]- Details\n> Body';
+const classicPrepared=await LarkCliSyncPlugin.prototype.readNoteForLark.call(classicPlugin,fakeNote);
+assert.match(classicPrepared.content,/📝 NOTE/);assert.doesNotMatch(classicPrepared.content,/\[!note\]/);
+classicPlugin.settings.nativeCalloutExport=true;
+const nativePrepared=await LarkCliSyncPlugin.prototype.readNoteForLark.call(classicPlugin,fakeNote);
+assert.match(nativePrepared.content,/> \[!note\]- Details/);
+classicPlugin.settings.nativeCalloutExport=false;
+classicPlugin.settings.documentBindings[fakeNote.path]=canonicalBinding;
+classicPlugin.settings.nativeCalloutStates={[canonicalBinding.token]:{version:1,sourceHash:'native',units:[]}};
+assert.match((await LarkCliSyncPlugin.prototype.readNoteForLark.call(classicPlugin,fakeNote)).content,/> \[!note\]- Details/);
+console.log('Native Callout opt-in, persistent routing, and default settings tests passed');
+
+const readOnlyUnbind=createPublishingPlugin();
+readOnlyUnbind.settings.documentBindings[fakeNote.path]=canonicalBinding;
+readOnlyUnbind.app.fileManager.processFrontMatter=async()=>{throw new Error('disabled frontmatter must remain read-only');};
+readOnlyUnbind.app.metadataCache.getFileCache=()=>({frontmatter:{lark_doc_url:canonicalBinding.url}});
+await readOnlyUnbind.unbindDeletedRemoteDocument(fakeNote,canonicalBinding);
+assert.equal(readOnlyUnbind.settings.documentBindings[fakeNote.path],undefined);
+assert.equal(readOnlyUnbind.settings.disconnectedBindings[fakeNote.path],true);
+console.log('Read-only unbinding preserves source notes and blocks stale bindings');

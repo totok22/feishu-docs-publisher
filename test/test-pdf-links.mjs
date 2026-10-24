@@ -23,12 +23,16 @@ for (const source of [
 	`[[规格书/RVV-2.5平-3芯_充电机AC侧.pdf]]`, `[[RVV-2.5平-3芯_充电机AC侧.pdf]]`,
 	`[规格书](${encodeURI(path)}#page=3)`, `![规格书](${encodeURI(path)})`,
 	`[规格书](<${path}> "说明")`
-]) assert.equal(rewrite(source), cite, source);
+]) {
+  assert.ok(rewrite(source).includes(cite), source);
+  if (source.includes('#page=3')) assert.match(rewrite(source), /p\.3/);
+  if (source.includes('|规格书')) assert.match(rewrite(source), /规格书/);
+}
 assert.equal(rewrite(`前文 [[${path}]]，后文 ![[${path}]]。`), `前文 ${cite}，后文 ${cite}。`);
 assert.equal(rewrite(cite), cite, "rewrites are idempotent");
 
 for (const source of [
-	"[[missing.pdf]]", "![[image.png]]", "[[note.md]]", "![[note.md]]",
+	"![[image.png]]", "[[note.md]]", "![[note.md]]",
 	`[外部](https://example.com/${encodeURI(path)})`, "[[bad%XX.pdf]]", "[[file:///tmp/report.pdf]]",
 	`\`[[${path}]]\``, `\`\`![[${path}]]\`\``, `<!-- [[${path}]] -->`, `\\[[${path}]]`,
 	`\`\`\`md\n[[${path}]]\n\`\`\``, `~~~\n![[${path}]]\n~~~`, `\`\`\`md\n[[${path}]]`
@@ -38,12 +42,12 @@ const spaced = new Map([["papers/report (final).PDF", { fileToken: "upper-pdf" }
 assert.match(rewrite("[Report](<papers/report (final).PDF>)", spaced), /doc-id="upper-pdf"/);
 
 const duplicates = new Map([["a/report.pdf", { fileToken: "first" }], ["b/report.pdf", { fileToken: "second" }]]);
-assert.equal(rewrite("[[report.pdf]]", duplicates), "[[report.pdf]]", "ambiguous fallback paths must stay literal");
+assert.equal(rewrite("[[report.pdf]]", duplicates), "report.pdf（PDF 未发布或未绑定）", "ambiguous fallback paths must warn");
 assert.match(rewrite("[[report.pdf]]", duplicates, { path: "b/note.md" }), /doc-id="second"/);
 assert.match(rewrite("[[report.pdf]]", duplicates, note, () => "b/report.pdf"), /doc-id="second"/);
-assert.equal(rewrite("[[report.pdf]]", duplicates, note, () => "unpublished/report.pdf"), "[[report.pdf]]",
+assert.equal(rewrite("[[report.pdf]]", duplicates, note, () => "unpublished/report.pdf"), "report.pdf（PDF 未发布或未绑定）",
 	"never choose a published namesake when Obsidian resolves an unpublished PDF");
-assert.equal(rewrite(`[[${path}]]`, new Map([[path, { fileToken: 'unsafe"token' }]])), `[[${path}]]`);
+assert.equal(rewrite(`[[${path}]]`, new Map([[path, { fileToken: 'unsafe"token' }]])), `RVV-2.5平-3芯\\_充电机AC侧.pdf（PDF 未发布或未绑定）`);
 
 // Adding file metadata on fetch must not cause a rewrite of an unchanged PDF reference.
 const baseline = `# Note\n\n${cite}\n\nOriginal paragraph`;

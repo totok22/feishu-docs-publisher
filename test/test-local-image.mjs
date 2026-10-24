@@ -51,6 +51,10 @@ try {
 	const references = scanLocalImageReferences(markdown);
 	assert.equal(references.length, 3);
 	assert.equal(scanLocalImageReferences("第一行\r\n![[root.png]]\r\n")[0].sourceSyntax, "![[root.png]]");
+	assert.deepEqual(scanLocalImageReferences('`<!-- ![[hidden.png]]` then ![[root.png]] ![[clip.mp4]]')
+		.map(reference => reference.target), ['root.png', 'clip.mp4']);
+	assert.deepEqual(scanLocalImageReferences('<!-- ` ![[hidden.png]] --> ![[root.png]]')
+		.map(reference => reference.target), ['root.png']);
 
 	const prepared = await prepareLocalImages({
 		vaultRoot: workspace,

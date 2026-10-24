@@ -112,6 +112,23 @@ Local images and videos are uploaded with the note.
 - Videos: MP4, M4V, MOV, and WebM, shown as inline file previews. Playback depends on the codec and the Feishu/Lark client; H.264/AAC MP4 and MOV have been tested. Remote video URLs and ordinary links are not uploaded. Unchanged videos are reused.
 - If only a referenced image or video changes, save-triggered sync and the `pre-push` hook still sync the bound note.
 
+### Callout folding and research colors
+
+Enable **Settings → Content → Native Callout folding** (off by default) to export Callouts as native parent/child blocks. Nested Callouts, code, and local media stay inside their parent. `-` starts folded and `+` starts expanded. Unconverted notes use readable quote titles while the setting is off.
+
+```md
+> [!note]- Experiment details
+> Parameters
+>
+> ![[diagram.png|320]]
+```
+
+**The first conversion of an existing document rebuilds its body.** The document URL stays, but block comments and deep links may become invalid. Precise sync blocks this conversion. Merge remote edits first, then use Auto sync strategy to migrate. Turning the setting off keeps already converted documents on native sync to avoid flattening them.
+
+Later syncs keep matching leading and trailing top-level subtrees. Editing content inside a Callout replaces its containing top-level subtree. Reader fold changes are preserved; remote content edits stop synchronization. Only the title background is colored, rather than reproducing Obsidian's entire Callout border.
+
+**Research label colors** is a separate switch, also off by default. In native exports it colors bold labels before a colon red on yellow, such as `**Conclusion**: stable results`. Ordinary bold text and code stay unchanged. Native export needs the `docx:document.block:convert` scope, rejects remote images, and stops when a changed range exceeds 1,000 blocks. See [native export details](./docs/native-export.md).
+
 ### Sync a folder
 
 Right-click a folder and choose `Lark: Sync to Feishu/Lark`. The plugin creates the matching remote hierarchy, syncs the Markdown notes and PDFs, and rewrites links between notes so they point to the remote documents. Your local notes are not changed.
@@ -148,7 +165,9 @@ Notes can reference PDFs like this:
 
 After the upload, folder sync rewrites these into native Feishu/Lark file references. Publishing a single note for the first time, manual sync, and save-triggered sync reuse existing PDF bindings. If the PDF is outside the synced folder, upload it first or bind its remote URL.
 
-In Feishu/Lark the reference shows the remote file name. Aliases, page numbers, and preview sizes are dropped, and embeds become clickable file references. PDFs are not converted to Docx or previewed inline. References that are unpublished, pending, missing, or inside code stay as written. Duplicate file names resolve the way Obsidian links do.
+Ordinary PDF links become native file references with readable aliases, file names, and page numbers. Unpublished or unbound PDFs show a readable explanation and a warning to publish or bind them. Code examples stay unchanged. Duplicate file names resolve the way Obsidian links do; exact text-selection navigation is not retained.
+
+Page embeds and PDF++ region embeds render as images with page captions and requested dimensions. Examples: `![[report.pdf#page=2|600]]` and `![[report.pdf#page=2&rect=10,20,110,70|300]]`. Obsidian uses its bundled PDF.js. Git hooks require Poppler (`pdfinfo` and `pdftoppm`); publish rotated pages from Obsidian. Source PDFs remain unchanged.
 
 - Unchanged PDFs are skipped, based on the binding and a content hash. A changed PDF overwrites the same remote file, so its link stays valid. Renaming a PDF locally keeps the binding and the remote name.
 - PDFs update through manual sync and folder sync only, not through save-triggered sync or Git hooks.
@@ -203,6 +222,8 @@ Older versions did not record links when frontmatter was off. **Find existing li
 | CLI & authorization | Install or upgrade `lark-cli`, create the CLI app, sign in or out, set the path. See [step 2](#2-connect-your-account) | |
 | `Network proxy` | System environment, custom HTTP proxy, or no proxy | System environment |
 | `Title source` | First Markdown heading or file name | File name |
+| `Native Callout folding` | Export real folded parent/child blocks. First conversion rebuilds existing content; converted documents keep native sync when disabled | Off |
+| `Research label colors` | Color bold labels before a colon red on yellow in native exports | Off |
 | `Write binding to frontmatter` | Also store the URL as `lark_doc_url`. The binding in plugin data is kept either way | Off |
 | `Open after sync` | Open the document in your browser after publish or sync | On |
 | `Sync strategy` | `Auto (recommended)`: small edits update only the changed blocks, large or complex ones fall back to a full overwrite. `Safe precise sync`: never overwrites, reports an error instead. `Overwrite sync`: rewrites the remote document every time | Auto |
@@ -223,7 +244,7 @@ The plugin splits Markdown into top-level blocks and records their Feishu/Lark b
 
 Local Markdown is the source. If someone edits the remote document, merge those edits into the Markdown first, or a later sync can replace them.
 
-The plugin keeps its data in `.obsidian/plugins/feishu-docs-publisher/`. `data.json` holds settings, bindings, and pending records, and is not affected by cache trimming. `lark-sync-state.json` holds the incremental sync state.
+The plugin keeps its data in `.obsidian/plugins/feishu-docs-publisher/`. `data.json` holds settings, bindings, native export state, and pending records, and is not affected by cache trimming. `lark-sync-state.json` holds the incremental sync state.
 
 ---
 
@@ -293,6 +314,10 @@ Release history is in [CHANGELOG.md](./CHANGELOG.md), and each GitHub release us
 4. Commit and push, then push a tag that matches the version exactly, with no `v` prefix, for example `0.3.0`.
 5. `.github/workflows/release.yml` verifies the tag and notes, runs the tests and production build, attests the three plugin assets, and opens a draft release. Review it and publish.
 
+You can also dispatch the release workflow manually in GitHub Actions with an existing tag. Version and release-note checks still apply, and the workflow creates a draft release.
+
+Native Callouts, PDF crops, and research colors are adapted from [HeShiLie’s fork](https://github.com/HeShiLie/feishu-docs-publisher), with opt-in settings and video compatibility added here.
+
 ## License
 
-MIT License. Copyright (c) 2026 huan.wang and Copyright (c) 2026 totok22. See `LICENSE`.
+MIT License. Copyright (c) 2026 huan.wang, totok22, and HeShiLie. See `LICENSE`.

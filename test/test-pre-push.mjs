@@ -1005,7 +1005,7 @@ async function testPublishedPdfReferences(workspace) {
 	await resetWorkspaceFiles(workspace);
 	await mkdir(join(workspace, "papers"), { recursive: true });
 	await writeFile(join(workspace, "papers/report.pdf"), "%PDF-1.4\n%%EOF");
-	const source = boundMarkdown("https://example.feishu.cn/docx/doc-token", "[[papers/report.pdf]] and ![[papers/report.pdf#page=2]]");
+	const source = boundMarkdown("https://example.feishu.cn/docx/doc-token", "[[papers/report.pdf]] and [[papers/report.pdf#page=2]]");
 	await writeFile(join(workspace, "bound.md"), source);
 	await execFileAsync("git", ["add", "bound.md"], { cwd: workspace });
 	await writeSettings(workspace, { syncStrategy: "overwrite", language: "en",
@@ -1324,7 +1324,8 @@ async function testDeletedRemoteDocumentRemovesPersistedBinding(workspace, legac
 	assert.equal(settings.unrelatedSetting, "keep");
 	assert.equal(settings.updateFrontmatter, false);
 	assert.ok(settings.larkCliVersionCheck);
-	assert.equal(await readFile(join(workspace, "bound.md"), "utf8"), legacyFrontmatter ? "---\ntags: [sync]\n---\nBody" : "Body");
+	assert.equal(await readFile(join(workspace, "bound.md"), "utf8"), original);
+	assert.equal(settings.disconnectedBindings["bound.md"], true);
 	assert.equal((await readSyncState(workspace)).documents["doc-token"], undefined);
 	await clearLog(workspace);
 	await runHook(workspace);
@@ -1362,7 +1363,7 @@ tags:
 ---
 Body`);
 	await execFileAsync("git", ["add", "bound.md"], { cwd: workspace });
-	await writeSettings(workspace, { autoSyncMode: "pre-push", syncStrategy: "precise", language: "zh-CN" });
+	await writeSettings(workspace, { autoSyncMode: "pre-push", syncStrategy: "precise", language: "zh-CN", updateFrontmatter: true });
 	await writeSyncState(workspace, "https://example.feishu.cn/docx/doc-token", "# bound\n\nBody");
 	await clearLog(workspace);
 
@@ -1373,7 +1374,7 @@ Body`);
 
 	assert.equal(result.exitCode, 1);
 	assert.match(result.stderr, /飞书文档远端已删除：bound\.md/);
-	assert.match(result.stderr, /已自动解绑，请提交变更后重新 push/);
+	assert.match(result.stderr, /已自动解绑，请检查本地变更后重新 push/);
 	assert.equal(await readFile(join(workspace, "bound.md"), "utf8"), `---
 tags:
   - sync

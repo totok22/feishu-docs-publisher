@@ -1,3 +1,4 @@
+import { transformProse } from "./obsidian-export";
 import { createHash } from "crypto";
 import { createReadStream } from "fs";
 import { readdir, readFile, realpath } from "fs/promises";
@@ -75,29 +76,29 @@ export async function buildLocalImageFileIndex(vaultRoot: string): Promise<Local
 	return buildLocalFileIndex(vaultRoot, false);
 }
 
-export async function buildLocalMediaFileIndex(vaultRoot: string): Promise<LocalImageFileIndex> {
-	return buildLocalFileIndex(vaultRoot, true);
+export async function buildLocalMediaFileIndex(vaultRoot: string, includePdf = false): Promise<LocalImageFileIndex> {
+	return buildLocalFileIndex(vaultRoot, true, includePdf);
 }
 
-async function buildLocalFileIndex(vaultRoot: string, includeVideos: boolean): Promise<LocalImageFileIndex> {
+async function buildLocalFileIndex(vaultRoot: string, includeVideos: boolean, includePdf = false): Promise<LocalImageFileIndex> {
 	const paths = new Set<string>();
-	await collectImageFiles(vaultRoot, vaultRoot, paths, includeVideos);
-	return buildLocalFileIndexFromPaths(paths, includeVideos);
+	await collectImageFiles(vaultRoot, vaultRoot, paths, includeVideos, includePdf);
+	return buildLocalFileIndexFromPaths(paths, includeVideos, includePdf);
 }
 
 export function buildLocalImageFileIndexFromPaths(filePaths: Iterable<string>): LocalImageFileIndex {
 	return buildLocalFileIndexFromPaths(filePaths, false);
 }
 
-export function buildLocalMediaFileIndexFromPaths(filePaths: Iterable<string>): LocalImageFileIndex {
-	return buildLocalFileIndexFromPaths(filePaths, true);
+export function buildLocalMediaFileIndexFromPaths(filePaths: Iterable<string>, includePdf = false): LocalImageFileIndex {
+	return buildLocalFileIndexFromPaths(filePaths, true, includePdf);
 }
 
-function buildLocalFileIndexFromPaths(filePaths: Iterable<string>, includeVideos: boolean): LocalImageFileIndex {
+function buildLocalFileIndexFromPaths(filePaths: Iterable<string>, includeVideos: boolean, includePdf = false): LocalImageFileIndex {
 	const paths = new Set<string>();
 	const pathsByBasename = new Map<string, string[]>();
 	for (const filePath of filePaths) {
-		if (!(isSupportedImagePath(filePath) || (includeVideos && isSupportedVideoPath(filePath)))) continue;
+		if (!(isSupportedImagePath(filePath) || (includeVideos && isSupportedVideoPath(filePath)) || (includePdf && /\.pdf$/i.test(filePath)))) continue;
 		const path = normalizeVaultPath(filePath);
 		if (paths.has(path)) continue;
 		paths.add(path);
@@ -155,31 +156,15 @@ export async function prepareLocalImages(input: PrepareLocalImagesInput): Promis
 
 export function scanLocalImageReferences(content: string): LocalImageReference[] {
 	const references: LocalImageReference[] = [];
-	const protectedVideoRanges = collectProtectedVideoRanges(content);
-	let offset = 0;
-	let fenceMarker = "";
-	while (offset <= content.length) {
-		const nextLineBreak = content.indexOf("\n", offset);
-		const rawLine = content.slice(offset, nextLineBreak < 0 ? content.length : nextLineBreak);
-		const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
-		const fenceMatch = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
-		if (fenceMatch?.[1]) {
-			const marker = fenceMatch[1];
-			if (!fenceMarker && !(marker[0] === "`" && fenceMatch[2]?.includes("`"))) {
-				fenceMarker = marker;
-			} else if (fenceMarker[0] === marker[0] && marker.length >= fenceMarker.length
-				&& !fenceMatch[2]?.trim()) {
-				fenceMarker = "";
-			}
-		} else if (!fenceMarker) {
-			references.push(...scanLineImageReferences(line, offset, protectedVideoRanges));
+	transformProse(content, (prose, start) => {
+		let offset = start;
+		for (const line of prose.split("\n")) {
+			references.push(...scanLineImageReferences(line.replace(/\r$/, ""), offset));
+			offset += line.length + 1;
 		}
-		if (nextLineBreak < 0) {
-			break;
-		}
-		offset = nextLineBreak + 1;
-	}
-	return references.sort((left, right) => left.start - right.start);
+		return prose;
+	});
+	return references.sort((a, b) => a.start - b.start);
 }
 
 export async function findReferencingMarkdownFiles(input: FindReferencingMarkdownInput): Promise<string[]> {
@@ -251,21 +236,19 @@ export function isSupportedLocalMediaPath(path: string): boolean {
 
 function scanLineImageReferences(
 	line: string,
-	lineOffset: number,
-	protectedVideoRanges: Array<{ start: number; end: number }>
+	lineOffset: number
 ): LocalImageReference[] {
 	const references: LocalImageReference[] = [];
 	const occupiedRanges: Array<{ start: number; end: number }> = [];
 	const wikiPattern = /!\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g;
 	let wikiMatch: RegExpExecArray | null;
 	while ((wikiMatch = wikiPattern.exec(line))) {
+		if (isEscaped(line, wikiMatch.index)) continue;
 		const sourceSyntax = wikiMatch[0] || "";
 		const target = (wikiMatch[1] || "").trim();
 		const video = isLocalVideoTarget(target);
 		const start = lineOffset + wikiMatch.index;
-		if (!target || (!isSupportedImagePath(stripQueryAndFragment(target)) && !video)
-			|| (video && (isEscaped(line, wikiMatch.index)
-				|| protectedVideoRanges.some((range) => start >= range.start && start < range.end)))) {
+		if (!target || (!isSupportedImagePath(stripQueryAndFragment(target)) && !video)) {
 			continue;
 		}
 		const dimensions = parseWikiImageAlias(wikiMatch[2] || "");
@@ -285,6 +268,7 @@ function scanLineImageReferences(
 	const markdownPattern = /!\[([^\]]*)\]\((<[^>]+>|[^)\s]+)(?:\s+["'][^)]*["'])?\)/g;
 	let markdownMatch: RegExpExecArray | null;
 	while ((markdownMatch = markdownPattern.exec(line))) {
+		if (isEscaped(line, markdownMatch.index)) continue;
 		const relativeStart = markdownMatch.index;
 		const relativeEnd = relativeStart + (markdownMatch[0] || "").length;
 		if (occupiedRanges.some((range) => relativeStart < range.end && relativeEnd > range.start)) {
@@ -293,9 +277,7 @@ function scanLineImageReferences(
 		const rawTarget = (markdownMatch[2] || "").replace(/^<|>$/g, "");
 		const video = isLocalVideoTarget(rawTarget);
 		const start = lineOffset + relativeStart;
-		if (/^https?:\/\//i.test(rawTarget) || (!isSupportedImagePath(stripQueryAndFragment(rawTarget)) && !video)
-			|| (video && (isEscaped(line, relativeStart)
-				|| protectedVideoRanges.some((range) => start >= range.start && start < range.end)))) {
+		if (/^https?:\/\//i.test(rawTarget) || (!isSupportedImagePath(stripQueryAndFragment(rawTarget)) && !video)) {
 			continue;
 		}
 		const sourceSyntax = markdownMatch[0] || "";
@@ -323,34 +305,6 @@ function isEscaped(line: string, index: number): boolean {
 	return backslashes % 2 === 1;
 }
 
-function collectProtectedVideoRanges(content: string): Array<{ start: number; end: number }> {
-	const ranges: Array<{ start: number; end: number }> = [];
-	// Match whole blocks/comments before looking for inline delimiters, so their
-	// contents cannot open a code span or close a fence in the surrounding text.
-	const tokens = /^ {0,3}(`{3,})[^\n]*\n[\s\S]*?(?:^ {0,3}\1`*[ \t]*(?=\r?$)|$(?![\s\S]))|^ {0,3}(~{3,})[^\n]*\n[\s\S]*?(?:^ {0,3}\2~*[ \t]*(?=\r?$)|$(?![\s\S]))|<!--[\s\S]*?(?:-->|$(?![\s\S]))|^(?: {4}|\t)[^\r\n]*|`+/gm;
-	let token: RegExpExecArray | null;
-	while ((token = tokens.exec(content))) {
-		const start = token.index;
-		if (!/^`+$/.test(token[0])) {
-			ranges.push({ start, end: tokens.lastIndex });
-			continue;
-		}
-		if (isEscaped(content, start)) continue;
-		const closingRuns = /`+/g;
-		closingRuns.lastIndex = tokens.lastIndex;
-		let closing: RegExpExecArray | null;
-		while ((closing = closingRuns.exec(content))) {
-			// An inline code span cannot cross a paragraph boundary.
-			if (/\r?\n[ \t]*\r?\n/.test(content.slice(tokens.lastIndex, closing.index))) break;
-			if (closing[0].length !== token[0].length) continue;
-			ranges.push({ start, end: closingRuns.lastIndex });
-			tokens.lastIndex = closingRuns.lastIndex;
-			break;
-		}
-	}
-	return ranges;
-}
-
 function parseWikiImageAlias(alias: string): { width?: number; height?: number; alt?: string } {
 	const normalizedAlias = alias.trim();
 	const dimensions = normalizedAlias.match(/^(\d+)(?:x(\d+))?$/i);
@@ -363,7 +317,7 @@ function parseWikiImageAlias(alias: string): { width?: number; height?: number; 
 	};
 }
 
-function resolveLocalImageVaultPath(
+export function resolveLocalImageVaultPath(
 	target: string,
 	markdownPath: string,
 	imageIndex: LocalImageFileIndex
@@ -513,7 +467,7 @@ function calculateDisplayDimensions(
 	};
 }
 
-function replaceImageReferences(
+export function replaceImageReferences(
 	content: string,
 	references: LocalImageReference[],
 	images: LocalImageResource[]
@@ -533,8 +487,15 @@ function replaceImageReferences(
 		const suffix = content.slice(reference.end, lineEnd).trim();
 		const previousLineStart = lineStart > 0 ? content.lastIndexOf("\n", lineStart - 2) + 1 : 0;
 		const previousLine = lineStart > 0 ? content.slice(previousLineStart, lineStart - 1).trim() : "";
-		const separatorBefore = prefix ? "\n\n" : previousLine ? "\n" : "";
-		const separatorAfter = suffix ? "\n\n" : "";
+		const rawPrefix = content.slice(lineStart, reference.start);
+		const container = rawPrefix.match(/^([ \t]*(?:>[ \t]?)*)[ \t]*(?:([-+*]|\d+[.)])([ \t]+))?/);
+		const leading = container?.[0] || "";
+		const continuation = (container?.[1] || "") + (container?.[2] ? " ".repeat(container[2].length + (container[3]?.length || 1)) : leading.slice((container?.[1] || "").length));
+		const bodyPrefix = continuation.replace(/\t/g, "    ");
+		const separator = `\n${bodyPrefix.trimEnd()}\n${bodyPrefix}`;
+		const hasText = rawPrefix.slice(leading.length).trim().length > 0;
+		const separatorBefore = hasText ? separator : previousLine && !prefix ? "\n" : "";
+		const separatorAfter = suffix ? separator : "";
 		result += `${separatorBefore}${image.placeholder}${separatorAfter}`;
 		cursor = reference.end;
 	}
@@ -545,7 +506,8 @@ async function collectImageFiles(
 	vaultRoot: string,
 	directory: string,
 	paths: Set<string>,
-	includeVideos: boolean
+	includeVideos: boolean,
+	includePdf = false
 ): Promise<void> {
 	const entries = await readdir(directory, { withFileTypes: true });
 	for (const entry of entries) {
@@ -554,11 +516,11 @@ async function collectImageFiles(
 		}
 		const absolutePath = join(directory, entry.name);
 		if (entry.isDirectory()) {
-			await collectImageFiles(vaultRoot, absolutePath, paths, includeVideos);
+			await collectImageFiles(vaultRoot, absolutePath, paths, includeVideos, includePdf);
 			continue;
 		}
 		if (!entry.isFile() || !(isSupportedImagePath(entry.name)
-			|| (includeVideos && isSupportedVideoPath(entry.name)))) {
+			|| (includeVideos && isSupportedVideoPath(entry.name)) || (includePdf && /\.pdf$/i.test(entry.name)))) {
 			continue;
 		}
 		const vaultPath = normalizeVaultPath(relative(vaultRoot, absolutePath));

@@ -1,6 +1,12 @@
 name: Release Obsidian plugin
 
 on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to build
+        required: true
+        type: string
   push:
     tags:
       - "*"
@@ -14,6 +20,8 @@ jobs:
       attestations: write
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Use Node.js
         uses: actions/setup-node@v6
@@ -23,7 +31,7 @@ jobs:
 
       - name: Verify release metadata
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: npm run release:check
 
       - name: Install, test, and build
@@ -42,9 +50,10 @@ jobs:
       - name: Create draft release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            --title="$GITHUB_REF_NAME" \
+          gh release create "$RELEASE_TAG" \
+            --title="$RELEASE_TAG" \
             --draft \
-            --notes-file "release-notes/$GITHUB_REF_NAME.md" \
+            --notes-file "release-notes/$RELEASE_TAG.md" \
             main.js manifest.json styles.css

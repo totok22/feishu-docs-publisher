@@ -1,3 +1,4 @@
+import { transformProse, ExportWarning } from "./obsidian-export";
 import { LinkContextFile, normalizeLinkPath, parentPath } from "./link-rewrite";
 
 export interface PublishedPdfTarget {
@@ -29,32 +30,43 @@ export function rewritePublishedPdfLinks(
 	content: string,
 	targets: Map<string, PublishedPdfTarget>,
 	currentFile: LinkContextFile,
-	resolvePath?: PdfPathResolver
+	resolvePath?: PdfPathResolver,
+	warn?: ExportWarning
 ): string {
-	if (targets.size === 0 || !/\.pdf\b/i.test(content)) return content;
-	// Keep examples in fenced/inline code and HTML comments as literal text.
-	const protectedPattern = /^ {0,3}(`{3,})[^\n]*\n[\s\S]*?(?:^ {0,3}\1`*[ \t]*(?=\r?$)|$(?![\s\S]))|^ {0,3}(~{3,})[^\n]*\n[\s\S]*?(?:^ {0,3}\2~*[ \t]*(?=\r?$)|$(?![\s\S]))|<!--[\s\S]*?(?:-->|$(?![\s\S]))|(`+)[\s\S]*?\3(?!`)/gm;
-	let offset = 0;
-	let rewritten = "";
-	for (const match of content.matchAll(protectedPattern)) {
-		rewritten += rewriteText(content.slice(offset, match.index), targets, currentFile, resolvePath) + match[0];
-		if (match.index === undefined) continue;
-		offset = match.index + match[0].length;
-	}
-	return rewritten + rewriteText(content.slice(offset), targets, currentFile, resolvePath);
+	if (!/\.pdf\b/i.test(content)) return content;
+	return transformProse(content, (text) => rewriteText(text, targets, currentFile, resolvePath, warn));
 }
 
-function rewriteText(content: string, targets: Map<string, PublishedPdfTarget>, file: LinkContextFile, resolvePath?: PdfPathResolver): string {
-	// Process both syntaxes in one pass so generated XML is never reinterpreted.
-	return content.replace(/!?\[\[([^\]\n|]+)(?:\|[^\]\n]*)?\]\]|!?\[([^\]\n]*)\]\((<[^>\n]+>|[^\s)]+)(?:\s+["'][^\n]*?["'])?\)/g,
-		(match, wikiTarget: string | undefined, _label: string, markdownTarget: string | undefined, index: number) => {
+function readableLabel(text: string): string {
+	return text.replace(/[\\`*_[\]<>$~|]/g, "\\$&");
+}
+
+function rewriteText(content: string, targets: Map<string, PublishedPdfTarget>, file: LinkContextFile,
+	resolvePath?: PdfPathResolver, warn?: ExportWarning): string {
+	return content.replace(/!?\[\[([^\]\n|]+)(?:\|([^\]\n]*))?\]\]|!?\[([^\]\n]*)\]\((<[^>\n]+>|[^\s)]+)(?:\s+["'][^\n]*?["'])?\)/g,
+		(match, wikiTarget: string | undefined, alias: string | undefined, label: string, markdownTarget: string | undefined, index: number) => {
 			if (isEscaped(content, index)) return match;
-			const target = decodeTarget(wikiTarget ?? markdownTarget ?? "");
+			const raw = (wikiTarget ?? markdownTarget ?? "").trim().replace(/^<|>$/g, "");
+			const target = decodeTarget(raw);
 			if (!target) return match;
+			const params = new URLSearchParams(raw.split("#").slice(1).join("#"));
+			const page = params.get("page");
+			const color = params.get("color");
+			const display = alias || label || target.split("/").pop() || target;
+			const details = [display];
+			if (display !== target.split("/").pop()) details.push(target.split("/").pop()!);
+			if (page) details.push(`p.${page}`);
+			if (color) details.push(color);
+			const readable = readableLabel(details.join(" · "));
 			const path = resolvePath ? resolvePath(target, file.path) : resolveFromPublishedPaths(target, targets, file);
 			const binding = path ? targets.get(normalizeLinkPath(path)) : undefined;
-			if (!binding || !/^[A-Za-z0-9_-]+$/.test(binding.fileToken)) return match;
-			return `<cite type="doc" doc-id="${binding.fileToken}" file-type="file"></cite>`;
+			if (!binding || !/^[A-Za-z0-9_-]+$/.test(binding.fileToken)) {
+				warn?.(`PDF 未解析：${target}${page ? `（p.${page}）` : ""}；请先发布或绑定此附件。`);
+				return `${readable}（PDF 未发布或未绑定）`;
+			}
+			if (params.has("selection") || page) warn?.(`PDF ${target}: 保留页码文本，文件引用不提供精确选区跳转。`);
+			const cite = `<cite type="doc" doc-id="${binding.fileToken}" file-type="file"></cite>`;
+			return alias || label || page || color ? `${readable} ${cite}` : cite;
 		});
 }
 

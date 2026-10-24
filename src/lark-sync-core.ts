@@ -1,3 +1,4 @@
+import { normalizeObsidianCallouts, ExportWarning } from "./obsidian-export";
 import { isLocalImagePlaceholder, isLocalVideoPlaceholder } from "./local-image";
 import { stripImageGalleryMarker } from "./image-gallery";
 
@@ -228,10 +229,11 @@ const LARGE_CHANGE_MIN_REPLACE_COUNT = 4;
 const MIN_REPLACE_RUN_LENGTH_TO_COMPACT = 3;
 const DOCUMENT_END_BLOCK_ID = "-1";
 
-export function prepareNoteContentForLark(file: NoteFile, content: string, titleSource: TitleSource): string {
+export function prepareNoteContentForLark(file: NoteFile, content: string, titleSource: TitleSource, warn?: ExportWarning, preserveCallouts = false): string {
 	const normalizedContent = separateHeadingImages(stripImageGalleryMarker(content));
 	const title = extractTitle(file, normalizedContent, titleSource);
-	return prependMarkdownTitle(normalizedContent, title);
+	const prepared = prependMarkdownTitle(normalizedContent, title);
+	return preserveCallouts ? prepared : normalizeObsidianCallouts(prepared, warn);
 }
 
 function separateHeadingImages(content: string): string {
@@ -3431,3 +3433,7 @@ function matchYamlObjectKey(line: string): { indent: number; name: string } | nu
 function escapeRegExp(value: string): string {
 	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
+
+export { prepareNativeCallouts } from "./native-callout";
+export { syncNativeDocument } from "./native-sync";
+export { preparePdfCropImages, scanPdfCropReferences } from "./pdf-crops";

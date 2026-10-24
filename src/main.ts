@@ -1,5 +1,9 @@
+import { preparePdfCropImages, scanPdfCropReferences } from "./pdf-crops";
+import { prepareNativeCallouts } from "./native-callout";
+import { NativeState, syncNativeDocument } from "./native-sync";
 import {
 	addIcon,
+	loadPdfJs,
 	App,
 	ButtonComponent,
 	FileSystemAdapter,
@@ -17,7 +21,7 @@ import { ChildProcess, execFile, spawn } from "child_process";
 import { constants } from "fs";
 import { access, chmod, copyFile, mkdir, readFile, rename, stat } from "fs/promises";
 import { mkdtemp, rm, writeFile } from "fs/promises";
-import { dirname, join } from "path";
+import { basename, dirname, join } from "path";
 import { homedir, tmpdir } from "os";
 import process from "process";
 import { promisify } from "util";
@@ -171,6 +175,8 @@ const DEFAULT_SETTINGS: LarkCliSyncSettings = {
 	titleSource: "file-name",
 	openAfterSync: true,
 	updateFrontmatter: false,
+	nativeCalloutExport: false,
+	researchLabelColors: false,
 	autoSyncMode: "save",
 	autoSyncDelaySeconds: 15,
 	syncStrategy: "auto",
@@ -234,6 +240,9 @@ type RemoteParentKind = "wiki" | "drive" | "my_library" | "unknown";
 type LarkCliAuthorizationKind = "login" | "app-configuration";
 
 interface LarkCliSyncSettings {
+	nativeCalloutExport: boolean;
+	researchLabelColors: boolean;
+	nativeCalloutStates?: Record<string, NativeState>;
 	language: Language;
 	larkCliPath: string;
 	larkCliVersionCheck?: LarkCliVersionCheck;
@@ -634,6 +643,10 @@ const MESSAGES = {
 		settingTitleSourceDesc: "可使用第一个 Markdown 标题，或始终使用文件名。",
 		titleSourceFirstHeading: "第一个标题",
 		titleSourceFileName: "文件名",
+		settingNativeCalloutName: "原生 Callout 折叠",
+		settingNativeCalloutDesc: "将 Callout 转为飞书可折叠块。已有文档首次转换会重建正文，块评论和定位链接可能失效。关闭后，已转换文档仍按原生结构同步；安全增量模式不自动转换已有文档。",
+		settingResearchColorsName: "科研标签配色",
+		settingResearchColorsDesc: "在原生导出中，将冒号前的加粗标签设为红字、黄色背景。",
 		settingWriteBindingName: "写入 frontmatter 绑定信息",
 		settingWriteBindingDesc: "发布后额外写入笔记 frontmatter；关闭后，绑定仍保存在插件数据中。",
 		settingOpenAfterSyncName: "同步后打开文档",
@@ -806,6 +819,10 @@ const MESSAGES = {
 		settingTitleSourceDesc: "Use the first Markdown heading when available, or always use the file name.",
 		titleSourceFirstHeading: "First heading",
 		titleSourceFileName: "File name",
+		settingNativeCalloutName: "Native Callout folding",
+		settingNativeCalloutDesc: "Export Callouts as native foldable blocks. First conversion rebuilds existing content and may invalidate block comments and links. Converted documents keep native sync when disabled. Precise mode blocks conversion of existing documents.",
+		settingResearchColorsName: "Research label colors",
+		settingResearchColorsDesc: "In native exports, color bold labels before a colon red on yellow.",
 		settingWriteBindingName: "Write binding to frontmatter",
 		settingWriteBindingDesc: "Additionally store the URL in note frontmatter. Bindings remain in plugin data when disabled.",
 		settingOpenAfterSyncName: "Open after sync",
@@ -2881,16 +2898,77 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		const rawContent = await this.app.vault.read(file);
 		const normalizedContent = removeBindingOnlyFrontmatterBeforeNextFrontmatter(rawContent);
 		const contentWithoutBinding = removeLarkBinding(normalizedContent);
-		const content = prepareNoteContentForLark(file, contentWithoutBinding, this.settings.titleSource);
-		if (scanLocalImageReferences(content).length === 0) {
-			return { content, images: [] };
-		}
-		return await prepareLocalImages({
+		const warnings: string[] = [];
+		const binding = this.getBinding(file);
+		const preserveCallouts =
+			this.settings.nativeCalloutExport || !!this.nativeStateForDocument(binding?.token || binding?.url || "");
+		const content = prepareNoteContentForLark(
+			file,
+			contentWithoutBinding,
+			this.settings.titleSource,
+			(warning) => warnings.push(warning),
+			preserveCallouts
+		);
+		this.reportExportWarnings(file, warnings);
+		const pdf = scanPdfCropReferences(content).length
+			? await preparePdfCropImages({
+					vaultRoot: this.getVaultRoot(),
+					markdownPath: file.path,
+					content,
+					imageIndex: buildLocalMediaFileIndexFromPaths(
+						this.app.vault.getFiles().map((file) => file.path),
+						true
+					),
+					render: async (path, pageNumber, rect) => {
+						const pdfjs = await loadPdfJs();
+						const task = pdfjs.getDocument({
+							data: new Uint8Array(await readFile(path)),
+							isEvalSupported: false
+						});
+						const document = await task.promise;
+						try {
+							const page = await document.getPage(pageNumber),
+								viewport = page.getViewport({ scale: 2 });
+							const region = rect
+								? viewport.convertToViewportRectangle(rect)
+								: [0, 0, viewport.width, viewport.height];
+							const left = Math.min(region[0], region[2]),
+								top = Math.min(region[1], region[3]);
+							const width = Math.ceil(Math.abs(region[2] - region[0])),
+								height = Math.ceil(Math.abs(region[3] - region[1]));
+							if (
+								left < 0 ||
+								top < 0 ||
+								left + width > viewport.width + 1 ||
+								top + height > viewport.height + 1 ||
+								width < 1 ||
+								height < 1
+							)
+								throw new Error("PDF 裁剪区域超出页面边界");
+							const canvas = createEl("canvas");
+							canvas.width = width;
+							canvas.height = height;
+							await page.render({
+								canvasContext: canvas.getContext("2d"),
+								viewport,
+								transform: [1, 0, 0, 1, -left, -top],
+								background: "rgb(255,255,255)"
+							}).promise;
+							return Buffer.from(canvas.toDataURL("image/png").split(",")[1]!, "base64");
+						} finally {
+							await document.destroy();
+						}
+					}
+				})
+			: { content, images: [] };
+		if (!scanLocalImageReferences(pdf.content).length) return pdf;
+		const local = await prepareLocalImages({
 			vaultRoot: this.getVaultRoot(),
 			markdownPath: file.path,
-			content,
+			content: pdf.content,
 			imageIndex: this.buildVaultMediaIndex()
 		});
+		return { content: local.content, images: [...pdf.images, ...local.images] };
 	}
 
 	private getVaultRoot(): string {
@@ -2941,7 +3019,8 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			preparedContent.content,
 			this.getStagedPublishOptions()
 		);
-		const initialBodyContent = publishPlan.staged ? "" : bodyContent;
+		const native = this.settings.nativeCalloutExport && this.hasNativeCallouts(preparedContent.content);
+		const initialBodyContent = native || publishPlan.staged ? "" : bodyContent;
 		return await this.withTempMarkdown(file.basename, initialBodyContent, async (tempFile) => {
 			const args = ["docs", "+create", "--api-version", "v2", "--as", "user", "--doc-format", "markdown",
 				"--title", title, "--content", `@${tempFile.fileName}`, "--json"];
@@ -2980,12 +3059,98 @@ exec "${nodePath}" "${scriptPath}" "$@"
 				binding, file.parent?.name || "", this.parentPath(file.path), remoteParent
 			));
 			await onCreated?.(binding);
+			if (native) {
+				await this.syncNativePreparedDocument(token, preparedContent, true);
+				return binding;
+			}
 			if (publishPlan.staged) {
 				await this.appendStagedDocumentBatches(token || url, publishPlan.batches);
 			}
 			await this.materializeLocalImages(token, preparedContent.images);
 			return binding;
 		});
+	}
+
+	private nativeStateForDocument(doc: string): NativeState | undefined {
+		return this.settings.nativeCalloutStates?.[getDocumentStateKey(doc)];
+	}
+
+	private hasNativeCallouts(content: string): boolean {
+		return /\[![\w-]+/.test(content) && prepareNativeCallouts(content).callouts.length > 0;
+	}
+
+	private async syncNativePreparedDocument(
+		doc: string,
+		prepared: PreparedNoteContent,
+		creating = false,
+		strategy = this.settings.syncStrategy
+	): Promise<void> {
+		const fetched = await this.fetchLarkDocumentWithIds(doc);
+		const canonical =
+			fetched.doc ||
+			fetched.content.match(/<title\b[^>]*\bid="([A-Za-z0-9_-]+)"/)?.[1] ||
+			getDocumentStateKey(doc);
+		if (!canonical) throw new Error("无法解析原生折叠文档 ID");
+		const previous = this.nativeStateForDocument(canonical);
+		await syncNativeDocument(
+			canonical,
+			stripPreparedMarkdownTitle(prepared.content),
+			{
+				allowReplaceUntracked: creating || strategy !== "precise",
+				labelColors: this.settings.researchLabelColors,
+				images: prepared.images,
+				uploadImage: async (blockId, image) => {
+					const result = await this.runLarkCli(
+						[
+							"docs",
+							"+media-upload",
+							"--as",
+							"user",
+							"--doc-id",
+							canonical,
+							"--parent-type",
+							"docx_image",
+							"--parent-node",
+							blockId,
+							"--file",
+							`./${basename(image.absolutePath)}`,
+							"--json"
+						],
+						{ cwd: dirname(image.absolutePath) }
+					);
+					if (!result.data?.file_token) throw new Error("图片上传未返回 file_token");
+					return result.data.file_token;
+				},
+				api: async (method, path, body, params) => {
+					return await this.withTempMarkdown(
+						"native-request",
+						body === undefined ? "" : JSON.stringify(body),
+						async (file) => {
+							const args = ["api", method, path, "--as", "user", "--json"];
+							if (body !== undefined) args.push("--data", `@${file.fileName}`);
+							if (params) args.push("--params", JSON.stringify(params));
+							const result = await this.runLarkCli(args, { cwd: file.directory });
+							if (!result.ok || !result.data) throw new Error("原生块操作返回异常");
+							return result.data;
+						}
+					);
+				},
+				save: async (state) => {
+					(this.settings.nativeCalloutStates ??= {})[canonical] = state;
+					const alias = getDocumentStateKey(doc);
+					if (alias) this.settings.nativeCalloutStates[alias] = state;
+					await this.saveSettingsWithoutClearingCommandCache();
+				},
+				materialize: async () => {
+					await this.materializeLocalImages(
+						canonical,
+						prepared.images.filter((image) => image.mediaType === "video")
+					);
+				}
+			},
+			previous,
+			extractTitle({ basename: "" }, prepared.content, "first-heading")
+		);
 	}
 
 	private getStagedPublishOptions() {
@@ -3031,6 +3196,10 @@ exec "${nodePath}" "${scriptPath}" "$@"
 	): Promise<Partial<BoundLarkDocument>> {
 		const content = preparedContent.content;
 		const strategy = context.strategy || this.settings.syncStrategy;
+		if ((this.settings.nativeCalloutExport && this.hasNativeCallouts(content)) || this.nativeStateForDocument(doc)) {
+			await this.syncNativePreparedDocument(doc, preparedContent, false, strategy);
+			return {};
+		}
 		if (strategy !== "overwrite") {
 			const resumedDocument = await this.tryResumeStagedDocumentPublish(doc, preparedContent, context);
 			if (resumedDocument) {
@@ -3304,6 +3473,8 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		binding: BoundLarkDocument,
 		baselineMarkdown?: string
 	): Promise<void> {
+		if (this.nativeStateForDocument(binding.token || binding.url)
+			|| (this.settings.nativeCalloutExport && baselineMarkdown && this.hasNativeCallouts(baselineMarkdown))) return;
 		if (baselineMarkdown !== undefined) {
 			await this.saveSyncStateFromBaselineAndRemoteIds(binding, baselineMarkdown);
 			return;
@@ -4094,9 +4265,20 @@ exec "${nodePath}" "${scriptPath}" "$@"
 	private rewritePublishedPdfReferences(file: TFile, content: string): string {
 		const targets = buildPublishedPdfTargets(this.settings.pdfBindings, this.settings.disconnectedFolders);
 		const metadata = this.app.metadataCache;
-		return rewritePublishedPdfLinks(content, targets, file, metadata?.getFirstLinkpathDest
+		const warnings: string[] = [];
+		const result = rewritePublishedPdfLinks(content, targets, file, metadata?.getFirstLinkpathDest
 			? (target, source) => metadata.getFirstLinkpathDest(target, source)?.path ?? null
-			: undefined);
+			: undefined, (warning) => warnings.push(warning));
+		this.reportExportWarnings(file, warnings);
+		return result;
+	}
+
+	private reportExportWarnings(file: TFile, warnings: string[]): void {
+		if (!warnings.length) return;
+		console.warn(`[Feishu export] ${file.path}`, [...new Set(warnings)]);
+		if (warnings.some((warning) => warning.startsWith("PDF 未解析"))) {
+			new Notice(`${file.path}：有 PDF 尚未发布或绑定，已保留可读引用。详情见开发者控制台。`, 10000);
+		}
 	}
 
 	private rewritePublishedFolderInternalLinks(file: TFile, content: string): string {
@@ -5373,10 +5555,11 @@ exec "${nodePath}" "${scriptPath}" "$@"
 
 	private async unbindDeletedRemoteDocument(file: TFile, binding: BoundLarkDocument): Promise<void> {
 		delete this.settings.documentBindings?.[file.path];
+		(this.settings.disconnectedBindings ??= {})[file.path] = true;
 		await this.saveSettingsWithoutClearingCommandCache();
 		this.selfWrittenPaths.set(file.path, Date.now());
 		const legacy = this.app.metadataCache?.getFileCache(file)?.frontmatter;
-		if (legacy?.[FRONTMATTER_URL_KEY] || legacy?.[FRONTMATTER_TOKEN_KEY]) {
+		if (this.settings.updateFrontmatter && (legacy?.[FRONTMATTER_URL_KEY] || legacy?.[FRONTMATTER_TOKEN_KEY])) {
 		await this.app.fileManager.processFrontMatter(file, (frontmatter: Record<string, unknown>) => {
 			delete frontmatter.lark_doc;
 			delete frontmatter[FRONTMATTER_URL_KEY];
@@ -6025,6 +6208,16 @@ class LarkCliSyncSettingTab extends PluginSettingTab {
 						}
 					},
 					{
+						name: t("settingNativeCalloutName"),
+						desc: t("settingNativeCalloutDesc"),
+						control: { type: "toggle", key: "nativeCalloutExport", defaultValue: DEFAULT_SETTINGS.nativeCalloutExport }
+					},
+					{
+						name: t("settingResearchColorsName"),
+						desc: t("settingResearchColorsDesc"),
+						control: { type: "toggle", key: "researchLabelColors", defaultValue: DEFAULT_SETTINGS.researchLabelColors }
+					},
+					{
 						name: t("settingWriteBindingName"),
 						desc: t("settingWriteBindingDesc"),
 						control: {
@@ -6163,6 +6356,12 @@ class LarkCliSyncSettingTab extends PluginSettingTab {
 				break;
 			case "titleSource":
 				settings.titleSource = value === "first-heading" ? "first-heading" : "file-name";
+				break;
+			case "nativeCalloutExport":
+				settings.nativeCalloutExport = value === true;
+				break;
+			case "researchLabelColors":
+				settings.researchLabelColors = value === true;
 				break;
 			case "updateFrontmatter":
 				settings.updateFrontmatter = value === true;
